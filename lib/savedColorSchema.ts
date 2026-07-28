@@ -83,6 +83,21 @@ const finiteNumber = (
   return value;
 };
 
+const hasDisallowedControlCharacter = (value: string) => {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (
+      code <= 0x08 ||
+      code === 0x0b ||
+      code === 0x0c ||
+      (code >= 0x0e && code <= 0x1f)
+    ) {
+      return true;
+    }
+  }
+  return false;
+};
+
 const boundedString = (
   value: unknown,
   label: string,
@@ -96,7 +111,7 @@ const boundedString = (
   if (
     typeof value !== "string" ||
     value.length > maximumLength ||
-    /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/u.test(value)
+    hasDisallowedControlCharacter(value)
   ) {
     throw new SavedColorImportError(`${label}が正しくありません`);
   }

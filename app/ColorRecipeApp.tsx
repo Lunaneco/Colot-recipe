@@ -842,7 +842,7 @@ export default function ColorRecipeApp() {
                   const currentIndex = MODES.findIndex(
                     (candidate) => candidate.id === entry.id,
                   );
-                  let nextIndex = currentIndex;
+                  let nextIndex: number;
                   if (event.key === "ArrowRight") {
                     nextIndex = (currentIndex + 1) % MODES.length;
                   } else if (event.key === "ArrowLeft") {
@@ -856,9 +856,11 @@ export default function ColorRecipeApp() {
                   }
                   event.preventDefault();
                   selectMode(MODES[nextIndex].id);
-                  event.currentTarget.parentElement
-                    ?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
-                    [nextIndex]?.focus();
+                  const tabButtons =
+                    event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
+                      '[role="tab"]',
+                    );
+                  tabButtons?.[nextIndex]?.focus();
                 }}
                 data-testid={`mode-${entry.id}`}
               >

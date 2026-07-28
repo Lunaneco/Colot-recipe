@@ -521,7 +521,7 @@ function backupKey(value: unknown, label: string) {
     typeof value !== "string" ||
     !value ||
     value.length > MAX_BACKUP_KEY_LENGTH ||
-    /[\u0000-\u001F]/u.test(value)
+    Array.from(value).some((character) => character.charCodeAt(0) <= 0x1f)
   ) {
     throw new AppBackupError(`${label}が正しくありません`);
   }
