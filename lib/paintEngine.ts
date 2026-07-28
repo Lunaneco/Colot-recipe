@@ -58,12 +58,12 @@ export interface BrushStampMetrics {
 
 export const DEFAULT_BRUSH_SETTINGS: Readonly<BrushSettings> = Object.freeze({
   size: 24,
-  opacity: 0.88,
+  opacity: 1,
   pressureSensitivity: 0.72,
   minimumPressure: 0.14,
-  moisture: 0.28,
-  bleed: 0.18,
-  hardness: 0.64,
+  moisture: 0,
+  bleed: 0,
+  hardness: 0.82,
   spacing: 0.16,
 });
 

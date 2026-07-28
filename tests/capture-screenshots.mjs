@@ -93,8 +93,8 @@ try {
   if (coloringBox) {
     await coloringCanvas.click({
       position: {
-        x: (coloringBox.width * 440) / 920,
-        y: (coloringBox.height * 130) / 720,
+        x: (coloringBox.width * 460) / 920,
+        y: (coloringBox.height * 210) / 720,
       },
     });
   }

@@ -44,6 +44,11 @@ import type {
   DrawingLayer,
   MixedColorSnapshot,
 } from "../lib/types";
+import {
+  CanvasZoomControls,
+  useCanvasPan,
+  useCanvasViewport,
+} from "./CanvasViewport";
 
 type DrawingStudioProps = {
   color: MixedColorSnapshot;
@@ -76,6 +81,7 @@ type StoredArtwork = {
 };
 
 type StoredDrawingSettings = {
+  version?: number;
   tool: BrushTool;
   brush: UiBrushSettings;
 };
@@ -98,7 +104,7 @@ const TOOL_OPTIONS: Array<{
   { id: "mixer", label: "混色ブラシ", icon: Blend },
 ];
 
-const DEFAULT_SETTINGS: UiBrushSettings = {
+const LEGACY_DEFAULT_SETTINGS: UiBrushSettings = {
   size: 34,
   opacity: 84,
   pressure: 72,
@@ -108,6 +114,24 @@ const DEFAULT_SETTINGS: UiBrushSettings = {
   spacing: 16,
   stabilization: 30,
 };
+
+const DEFAULT_SETTINGS: UiBrushSettings = {
+  ...LEGACY_DEFAULT_SETTINGS,
+  opacity: 100,
+  water: 0,
+  bleed: 0,
+  hardness: 82,
+};
+
+const DRAWING_SETTINGS_VERSION = 2;
+
+function isUnchangedLegacyBrush(brush: UiBrushSettings) {
+  return (
+    Object.entries(LEGACY_DEFAULT_SETTINGS) as Array<
+      [keyof UiBrushSettings, number]
+    >
+  ).every(([key, value]) => brush[key] === value);
+}
 
 const CANVAS_SIZES = {
   landscape: { width: 1000, height: 700, label: "よこ長" },
@@ -225,6 +249,9 @@ export function DrawingStudio({
   const [saveState, setSaveState] = useState<
     "saved" | "saving" | "error"
   >("saved");
+  const [zoom, setZoom] = useState(100);
+  const [panEnabled, setPanEnabled] = useState(false);
+  const [settingsHydrated, setSettingsHydrated] = useState(false);
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
   const mobileInspector = useRef<HTMLElement>(null);
   const mobileInspectorToggle = useRef<HTMLButtonElement>(null);
@@ -248,6 +275,27 @@ export function DrawingStudio({
   });
   const hydrated = useRef(false);
   const activeLayer = layers.find((layer) => layer.id === activeLayerId) ?? layers[0];
+  const {
+    viewportRef,
+    stageStyle,
+    changeZoomAroundCenter,
+  } = useCanvasViewport({
+    intrinsicWidth: canvasSize.width,
+    intrinsicHeight: canvasSize.height,
+    zoom,
+  });
+  const { handlers: panHandlers, isPanning } = useCanvasPan(
+    viewportRef,
+    panEnabled,
+  );
+
+  const changeZoom = useCallback(
+    (nextZoom: number) => {
+      if (nextZoom <= 100) setPanEnabled(false);
+      changeZoomAroundCenter(nextZoom, setZoom);
+    },
+    [changeZoomAroundCenter],
+  );
 
   const refreshHistory = useCallback(() => {
     setHistoryAvailability({
@@ -284,11 +332,19 @@ export function DrawingStudio({
           setTool(storedSettings.tool);
         }
         if (storedSettings?.brush) {
-          setSettings({ ...DEFAULT_SETTINGS, ...storedSettings.brush });
+          const shouldMigrateLegacyDefaults =
+            (storedSettings.version ?? 1) < DRAWING_SETTINGS_VERSION &&
+            isUnchangedLegacyBrush(storedSettings.brush);
+          setSettings(
+            shouldMigrateLegacyDefaults
+              ? DEFAULT_SETTINGS
+              : { ...DEFAULT_SETTINGS, ...storedSettings.brush },
+          );
         }
       })
       .finally(() => {
         hydrated.current = true;
+        if (!cancelled) setSettingsHydrated(true);
       });
     return () => {
       cancelled = true;
@@ -345,15 +401,16 @@ export function DrawingStudio({
   }, [layers, persist]);
 
   useEffect(() => {
-    if (!hydrated.current) return;
+    if (!settingsHydrated) return;
     const timer = window.setTimeout(() => {
       void saveSetting<StoredDrawingSettings>("drawing-tools", {
+        version: DRAWING_SETTINGS_VERSION,
         tool,
         brush: settings,
       }).catch(() => setSaveState("error"));
     }, 180);
     return () => window.clearTimeout(timer);
-  }, [settings, tool]);
+  }, [settings, settingsHydrated, tool]);
 
   const pushHistory = useCallback((entry: HistoryEntry) => {
     undoStack.current = [...undoStack.current.slice(-13), entry];
@@ -599,8 +656,22 @@ export function DrawingStudio({
     const pointPressure =
       event.pressure > 0 ? event.pressure : event.pointerType === "mouse" ? 0.5 : 0.35;
     return {
-      x: ((event.clientX - rect.left) / rect.width) * canvas.width,
-      y: ((event.clientY - rect.top) / rect.height) * canvas.height,
+      x: Math.max(
+        0,
+        Math.min(
+          canvas.width - 1,
+          ((event.clientX - rect.left) / Math.max(1, rect.width)) *
+            canvas.width,
+        ),
+      ),
+      y: Math.max(
+        0,
+        Math.min(
+          canvas.height - 1,
+          ((event.clientY - rect.top) / Math.max(1, rect.height)) *
+            canvas.height,
+        ),
+      ),
       pressure: pointPressure,
     };
   };
@@ -810,6 +881,7 @@ export function DrawingStudio({
   );
 
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (panEnabled) return;
     if (!activeLayer) return;
     const canvas = canvasRefs.current.get(activeLayer.id);
     if (!canvas) return;
@@ -984,6 +1056,8 @@ export function DrawingStudio({
         label: "用紙サイズを変更",
       });
       loadedUrls.current.clear();
+      setZoom(100);
+      setPanEnabled(false);
       setCanvasSize({ width: next.width, height: next.height });
       setLayers(resizedLayers);
       setActiveLayerId(after.activeLayerId);
@@ -1118,38 +1192,66 @@ export function DrawingStudio({
         </section>
 
         <section className="drawing-paper-shell" aria-label="おえかきキャンバス">
+          <CanvasZoomControls
+            label="おえかきキャンバス"
+            zoom={zoom}
+            panEnabled={panEnabled}
+            onZoomChange={changeZoom}
+            onPanEnabledChange={setPanEnabled}
+          />
           <div
-            className="drawing-paper"
-            style={{
-              aspectRatio: `${canvasSize.width} / ${canvasSize.height}`,
-              background,
-            }}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={endStroke}
-            onPointerCancel={endStroke}
-            data-testid="drawing-canvas"
+            ref={viewportRef}
+            className={`canvas-viewport ${panEnabled ? "is-pan-enabled" : ""} ${isPanning ? "is-panning" : ""}`}
+            role="region"
+            aria-label="おえかきキャンバスの表示領域"
+            tabIndex={0}
+            data-testid="drawing-viewport"
+            {...panHandlers}
           >
-            {layers.map((layer) => (
-              <canvas
-                key={layer.id}
-                ref={(node) => {
-                  if (node) canvasRefs.current.set(layer.id, node);
-                  else canvasRefs.current.delete(layer.id);
-                }}
-                width={canvasSize.width}
-                height={canvasSize.height}
-                className="drawing-layer-canvas"
+            <div className="canvas-scroll-content">
+              <div
+                className="canvas-zoom-stage"
                 style={{
-                  opacity: layer.visible ? layer.opacity / 100 : 0,
-                  zIndex: layers.indexOf(layer),
-                }}
-                aria-hidden="true"
-              />
-            ))}
-            <span className="drawing-cursor-label" aria-hidden="true">
-              {activeTool?.label}
-            </span>
+                  ...stageStyle,
+                  "--canvas-zoom": zoom,
+                } as React.CSSProperties}
+                data-testid="drawing-zoom-stage"
+              >
+                <div
+                  className="drawing-paper"
+                  style={{
+                    aspectRatio: `${canvasSize.width} / ${canvasSize.height}`,
+                    background,
+                  }}
+                  onPointerDown={handlePointerDown}
+                  onPointerMove={handlePointerMove}
+                  onPointerUp={endStroke}
+                  onPointerCancel={endStroke}
+                  data-testid="drawing-canvas"
+                >
+                  {layers.map((layer) => (
+                    <canvas
+                      key={layer.id}
+                      ref={(node) => {
+                        if (node) canvasRefs.current.set(layer.id, node);
+                        else canvasRefs.current.delete(layer.id);
+                      }}
+                      width={canvasSize.width}
+                      height={canvasSize.height}
+                      className="drawing-layer-canvas"
+                      style={{
+                        opacity: layer.visible ? layer.opacity / 100 : 0,
+                        zIndex: layers.indexOf(layer),
+                      }}
+                      aria-hidden="true"
+                    />
+                  ))}
+                  <span className="drawing-cursor-label" aria-hidden="true">
+                    {activeTool?.label}
+                  </span>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
 
