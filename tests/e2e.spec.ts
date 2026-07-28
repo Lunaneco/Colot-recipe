@@ -1,11 +1,19 @@
 import { expect, test, type BrowserContext, type Locator, type Page } from "@playwright/test";
 
 const APP_BASE_URL =
-  process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:3002";
+  process.env.PLAYWRIGHT_BASE_URL ??
+  (process.env.PLAYWRIGHT_STATIC === "true"
+    ? "http://127.0.0.1:4176/Colot-recipe/"
+    : "http://127.0.0.1:3002/");
 const TEST_COLOR_NAME = "夕焼けミルク";
 const TEST_COLOR_NOTE = "赤3・黄2・白1・水2の確認用レシピ";
 
 type Material = "red" | "yellow" | "white" | "water";
+
+function appPath(path: string) {
+  const basePath = new URL(APP_BASE_URL).pathname.replace(/\/$/, "");
+  return `${basePath}/${path.replace(/^\//, "")}`;
+}
 
 async function clearAppStorage(context: BrowserContext, page: Page) {
   // Each Playwright test already receives an isolated context. Clearing the
@@ -107,7 +115,7 @@ async function clickCanvasPoint(canvas: Locator, x: number, y: number) {
 
 test.beforeEach(async ({ context, page }) => {
   await clearAppStorage(context, page);
-  await page.goto("/");
+  await page.goto("./");
   await page.waitForLoadState("networkidle");
   await expect(
     page.getByRole("link", { name: "カラーレシピ ホーム" }),
@@ -123,13 +131,13 @@ test("ヘルプからナレーション・字幕付きチュートリアルを�
   request,
 }) => {
   const assets = [
-    ["/tutorial/color-recipe-tutorial.mp4", "video/mp4"],
-    ["/tutorial/color-recipe-tutorial-poster.webp", "image/webp"],
-    ["/tutorial/color-recipe-tutorial.ja.vtt", "text/vtt"],
+    ["tutorial/color-recipe-tutorial.mp4", "video/mp4"],
+    ["tutorial/color-recipe-tutorial-poster.webp", "image/webp"],
+    ["tutorial/color-recipe-tutorial.ja.vtt", "text/vtt"],
   ] as const;
 
   for (const [path, contentType] of assets) {
-    const response = await request.head(path);
+    const response = await request.head(appPath(path));
     expect(response.ok(), `${path} should be served`).toBe(true);
     expect(response.headers()["content-type"]).toContain(contentType);
   }
@@ -145,15 +153,15 @@ test("ヘルプからナレーション・字幕付きチュートリアルを�
   const video = dialog.locator("video");
   await expect(video).toHaveAttribute(
     "poster",
-    "/tutorial/color-recipe-tutorial-poster.webp",
+    appPath("tutorial/color-recipe-tutorial-poster.webp"),
   );
   await expect(video.locator("source")).toHaveAttribute(
     "src",
-    "/tutorial/color-recipe-tutorial.mp4",
+    appPath("tutorial/color-recipe-tutorial.mp4"),
   );
   await expect(video.locator("track")).toHaveAttribute(
     "src",
-    "/tutorial/color-recipe-tutorial.ja.vtt",
+    appPath("tutorial/color-recipe-tutorial.ja.vtt"),
   );
   await expect(video.locator("track")).toHaveAttribute("default", "");
 

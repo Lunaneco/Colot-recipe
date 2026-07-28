@@ -6,15 +6,11 @@ import tseslint from "typescript-eslint";
 
 const eslintConfig = defineConfig([
   globalIgnores([
-    ".next/**",
-    ".vinext/**",
     "out/**",
     "build/**",
     "dist/**",
-    ".wrangler/**",
     "test-results/**",
     "playwright-report/**",
-    "next-env.d.ts",
   ]),
   {
     files: ["**/*.{js,mjs,cjs,ts,tsx}"],

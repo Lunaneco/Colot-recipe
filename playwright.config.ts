@@ -1,6 +1,9 @@
 import { defineConfig, devices } from "@playwright/test";
 
-const localBaseUrl = "http://127.0.0.1:3002";
+const staticPreview = process.env.PLAYWRIGHT_STATIC === "true";
+const localBaseUrl = staticPreview
+  ? "http://127.0.0.1:4176/Colot-recipe/"
+  : "http://127.0.0.1:3002/";
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? localBaseUrl;
 
 export default defineConfig({
@@ -37,7 +40,9 @@ export default defineConfig({
   webServer: process.env.PLAYWRIGHT_BASE_URL
     ? undefined
     : {
-        command: "npm run dev -- --hostname 127.0.0.1 --port 3002",
+        command: staticPreview
+          ? "npm run preview -- --host 127.0.0.1 --port 4176 --strictPort"
+          : "npm run dev -- --host 127.0.0.1 --port 3002",
         url: localBaseUrl,
         reuseExistingServer: true,
         timeout: 120_000,

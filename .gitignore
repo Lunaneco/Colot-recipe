@@ -15,9 +15,7 @@
 /test-results/
 /playwright-report/
 
-# next.js
-/.next/
-/.vinext/
+# build output
 /out/
 
 # misc
@@ -35,11 +33,7 @@ yarn-error.log*
 .env.*
 !.env.example
 
-# vercel
-.vercel
-
 # typescript
-next-env.d.ts
 *.tsbuildinfo
 /dist/
 /.wrangler/

@@ -13,7 +13,7 @@ async function readDownload(download: Download) {
 test("保存パレットをUndo・Redoでき、版付きレシピJSONを安全に往復できる", async ({
   page,
 }) => {
-  await page.goto("/");
+  await page.goto("./");
   await page.waitForLoadState("networkidle");
   await expect(page.locator(".color-recipe-app")).toHaveAttribute(
     "data-app-ready",
