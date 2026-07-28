@@ -34,7 +34,7 @@
     "three": "^0.185.1"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "1.37.1",
+    "@cloudflare/vite-plugin": "1.47.0",
     "@cloudflare/workers-types": "^4.20260702.1",
     "@playwright/test": "^1.62.0",
     "@tailwindcss/postcss": "4.2.1",
