@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  DEFAULT_BRUSH_SETTINGS,
   compositeRgba,
   computeBrushStampMetrics,
   createPointerPoint,
@@ -54,6 +55,22 @@ test("pointer points normalise unsafe device values", () => {
     tiltY: 0,
     twist: 359,
   });
+});
+
+test("標準の筆は水なしの濃い絵の具として始まる", () => {
+  assert.equal(DEFAULT_BRUSH_SETTINGS.opacity, 1);
+  assert.equal(DEFAULT_BRUSH_SETTINGS.moisture, 0);
+  assert.equal(DEFAULT_BRUSH_SETTINGS.bleed, 0);
+  assert.ok(DEFAULT_BRUSH_SETTINGS.hardness >= 0.8);
+
+  const dryStamp = computeBrushStampMetrics(0.5, DEFAULT_BRUSH_SETTINGS);
+  const wetStamp = computeBrushStampMetrics(0.5, {
+    ...DEFAULT_BRUSH_SETTINGS,
+    moisture: 0.8,
+    bleed: 0.5,
+  });
+  assert.ok(dryStamp.alpha > wetStamp.alpha);
+  assert.ok(dryStamp.radius < wetStamp.radius);
 });
 
 test("brush stamps respond monotonically to pressure, water, bleed and hardness", () => {

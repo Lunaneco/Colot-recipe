@@ -2,16 +2,16 @@
 
 import {
   Brush,
-  Cat,
-  CircleDot,
-  Coffee,
+  CakeSlice,
+  CarFront,
   Download,
   Flower2,
   Grid2X2Plus,
   ImagePlus,
-  Mountain,
+  PawPrint,
+  Rabbit,
   Redo2,
-  Shapes,
+  Ribbon,
   SlidersHorizontal,
   Undo2,
   Upload,
@@ -34,6 +34,11 @@ import {
   saveSetting,
 } from "../lib/storage";
 import type { MixedColorSnapshot } from "../lib/types";
+import {
+  CanvasZoomControls,
+  useCanvasPan,
+  useCanvasViewport,
+} from "./CanvasViewport";
 
 type ColoringStudioProps = {
   color: MixedColorSnapshot;
@@ -42,12 +47,12 @@ type ColoringStudioProps = {
 };
 
 type TemplateId =
+  | "bear"
+  | "rabbit"
+  | "ribbon"
   | "flower"
-  | "animal"
-  | "cafe"
-  | "landscape"
-  | "sweets"
-  | "geometry"
+  | "car"
+  | "cake"
   | "upload";
 
 type TemplateDefinition = {
@@ -74,12 +79,12 @@ type StoredColoringProgress = {
 };
 
 const TEMPLATES: TemplateDefinition[] = [
-  { id: "flower", label: "花", description: "花束と小さな葉", icon: Flower2 },
-  { id: "animal", label: "動物", description: "窓辺のねこ", icon: Cat },
-  { id: "cafe", label: "カフェ", description: "カップと焼き菓子", icon: Coffee },
-  { id: "landscape", label: "風景", description: "山と湖の一日", icon: Mountain },
-  { id: "sweets", label: "スイーツ", description: "ケーキの時間", icon: CircleDot },
-  { id: "geometry", label: "幾何学", description: "重なるかたち", icon: Shapes },
+  { id: "bear", label: "くま", description: "にっこりテディベア", icon: PawPrint },
+  { id: "rabbit", label: "うさぎ", description: "にんじんとうさぎ", icon: Rabbit },
+  { id: "ribbon", label: "リボン", description: "おおきなリボン", icon: Ribbon },
+  { id: "flower", label: "おはな", description: "5まいの大きなお花", icon: Flower2 },
+  { id: "car", label: "くるま", description: "まるいくるま", icon: CarFront },
+  { id: "cake", label: "ケーキ", description: "いちごのケーキ", icon: CakeSlice },
 ];
 
 const WIDTH = 920;
@@ -96,9 +101,9 @@ const ALLOWED_UPLOAD_TYPES = new Set([
 
 function setupLineContext(context: CanvasRenderingContext2D) {
   context.clearRect(0, 0, WIDTH, HEIGHT);
-  context.strokeStyle = "#332f2a";
+  context.strokeStyle = "#2f2b27";
   context.fillStyle = "transparent";
-  context.lineWidth = 7;
+  context.lineWidth = 13;
   context.lineCap = "round";
   context.lineJoin = "round";
 }
@@ -116,204 +121,270 @@ function ellipse(
   context.stroke();
 }
 
+function closedPath(
+  context: CanvasRenderingContext2D,
+  draw: () => void,
+) {
+  context.beginPath();
+  draw();
+  context.closePath();
+  context.stroke();
+}
+
+function filledDot(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  radius: number,
+) {
+  context.save();
+  context.fillStyle = context.strokeStyle;
+  context.beginPath();
+  context.arc(x, y, radius, 0, Math.PI * 2);
+  context.fill();
+  context.restore();
+}
+
+function drawBear(context: CanvasRenderingContext2D) {
+  setupLineContext(context);
+
+  ellipse(context, 460, 520, 205, 165);
+  ellipse(context, 350, 646, 88, 50, -0.08);
+  ellipse(context, 570, 646, 88, 50, 0.08);
+
+  closedPath(context, () => {
+    context.moveTo(282, 186);
+    context.bezierCurveTo(218, 114, 276, 54, 350, 118);
+    context.bezierCurveTo(420, 84, 500, 84, 570, 118);
+    context.bezierCurveTo(644, 54, 702, 114, 638, 186);
+    context.bezierCurveTo(724, 274, 686, 423, 570, 454);
+    context.bezierCurveTo(510, 472, 410, 472, 350, 454);
+    context.bezierCurveTo(234, 423, 196, 274, 282, 186);
+  });
+  ellipse(context, 314, 151, 43, 38, -0.25);
+  ellipse(context, 606, 151, 43, 38, 0.25);
+  ellipse(context, 460, 354, 92, 70);
+  ellipse(context, 460, 545, 105, 93);
+  filledDot(context, 380, 286, 13);
+  filledDot(context, 540, 286, 13);
+  filledDot(context, 460, 338, 15);
+  context.beginPath();
+  context.moveTo(460, 354);
+  context.quadraticCurveTo(428, 389, 397, 365);
+  context.moveTo(460, 354);
+  context.quadraticCurveTo(492, 389, 523, 365);
+  context.stroke();
+}
+
+function drawRabbit(context: CanvasRenderingContext2D) {
+  setupLineContext(context);
+
+  ellipse(context, 360, 150, 62, 132, -0.12);
+  ellipse(context, 510, 144, 62, 138, 0.12);
+  ellipse(context, 362, 151, 25, 88, -0.12);
+  ellipse(context, 508, 146, 25, 92, 0.12);
+  ellipse(context, 435, 538, 174, 148);
+  ellipse(context, 435, 315, 193, 157);
+  ellipse(context, 435, 558, 88, 80);
+  ellipse(context, 604, 472, 47, 47);
+
+  filledDot(context, 365, 300, 12);
+  filledDot(context, 505, 300, 12);
+  filledDot(context, 435, 350, 13);
+  context.beginPath();
+  context.moveTo(435, 363);
+  context.quadraticCurveTo(408, 393, 382, 372);
+  context.moveTo(435, 363);
+  context.quadraticCurveTo(462, 393, 488, 372);
+  context.stroke();
+
+  closedPath(context, () => {
+    context.moveTo(675, 430);
+    context.quadraticCurveTo(748, 442, 780, 485);
+    context.lineTo(676, 650);
+    context.quadraticCurveTo(636, 540, 675, 430);
+  });
+  closedPath(context, () => {
+    context.moveTo(704, 438);
+    context.quadraticCurveTo(664, 374, 715, 347);
+    context.quadraticCurveTo(748, 386, 742, 448);
+  });
+  closedPath(context, () => {
+    context.moveTo(731, 443);
+    context.quadraticCurveTo(746, 370, 803, 382);
+    context.quadraticCurveTo(801, 431, 766, 468);
+  });
+}
+
+function drawRibbon(context: CanvasRenderingContext2D) {
+  setupLineContext(context);
+
+  closedPath(context, () => {
+    context.moveTo(413, 304);
+    context.bezierCurveTo(332, 186, 175, 175, 151, 294);
+    context.bezierCurveTo(129, 405, 276, 462, 421, 363);
+  });
+  closedPath(context, () => {
+    context.moveTo(507, 304);
+    context.bezierCurveTo(588, 186, 745, 175, 769, 294);
+    context.bezierCurveTo(791, 405, 644, 462, 499, 363);
+  });
+  closedPath(context, () => {
+    context.moveTo(427, 380);
+    context.lineTo(320, 625);
+    context.lineTo(423, 578);
+    context.lineTo(466, 650);
+    context.lineTo(472, 393);
+  });
+  closedPath(context, () => {
+    context.moveTo(493, 380);
+    context.lineTo(600, 625);
+    context.lineTo(497, 578);
+    context.lineTo(454, 650);
+    context.lineTo(448, 393);
+  });
+  context.beginPath();
+  context.roundRect(400, 286, 120, 124, 34);
+  context.closePath();
+  context.stroke();
+
+  [
+    [235, 112, 0.75],
+    [685, 112, 0.75],
+  ].forEach(([x, y, scale]) => {
+    closedPath(context, () => {
+      context.moveTo(x, y + 32 * scale);
+      context.bezierCurveTo(
+        x - 64 * scale,
+        y - 8 * scale,
+        x - 25 * scale,
+        y - 57 * scale,
+        x,
+        y - 22 * scale,
+      );
+      context.bezierCurveTo(
+        x + 25 * scale,
+        y - 57 * scale,
+        x + 64 * scale,
+        y - 8 * scale,
+        x,
+        y + 32 * scale,
+      );
+    });
+  });
+}
+
 function drawFlower(context: CanvasRenderingContext2D) {
   setupLineContext(context);
-  const centers = [
-    [440, 260, 1],
-    [280, 350, 0.72],
-    [625, 365, 0.78],
-  ] as const;
-  centers.forEach(([cx, cy, scale]) => {
-    for (let petal = 0; petal < 8; petal += 1) {
-      const angle = (petal / 8) * Math.PI * 2;
-      ellipse(
-        context,
-        cx + Math.cos(angle) * 74 * scale,
-        cy + Math.sin(angle) * 74 * scale,
-        48 * scale,
-        76 * scale,
-        angle + Math.PI / 2,
-      );
-    }
-    ellipse(context, cx, cy, 54 * scale, 54 * scale);
-    context.beginPath();
-    context.moveTo(cx, cy + 56 * scale);
-    context.bezierCurveTo(cx - 15, cy + 180, cx + 20, 515, cx - 10, 650);
-    context.stroke();
-  });
   [
-    [390, 465, -0.65],
-    [480, 535, 0.62],
-    [246, 535, -0.62],
-    [610, 555, 0.62],
-  ].forEach(([x, y, rotation]) => ellipse(context, x, y, 66, 31, rotation));
+    [460, 157, 70, 112, 0],
+    [596, 258, 70, 112, 1.23],
+    [544, 422, 70, 112, 2.5],
+    [376, 422, 70, 112, -2.5],
+    [324, 258, 70, 112, -1.23],
+  ].forEach(([x, y, radiusX, radiusY, rotation]) =>
+    ellipse(context, x, y, radiusX, radiusY, rotation),
+  );
+  ellipse(context, 460, 310, 92, 92);
   context.beginPath();
-  context.moveTo(135, 650);
-  context.bezierCurveTo(310, 617, 615, 665, 790, 635);
+  context.moveTo(460, 404);
+  context.bezierCurveTo(450, 495, 468, 570, 454, 672);
+  context.stroke();
+  ellipse(context, 354, 538, 95, 47, 0.55);
+  ellipse(context, 564, 588, 95, 47, -0.55);
+  filledDot(context, 425, 295, 9);
+  filledDot(context, 495, 295, 9);
+  context.beginPath();
+  context.arc(460, 324, 35, 0.15, Math.PI - 0.15);
   context.stroke();
 }
 
-function drawAnimal(context: CanvasRenderingContext2D) {
+function drawCar(context: CanvasRenderingContext2D) {
   setupLineContext(context);
-  context.beginPath();
-  context.moveTo(230, 480);
-  context.bezierCurveTo(170, 310, 245, 135, 455, 142);
-  context.bezierCurveTo(655, 138, 755, 300, 690, 505);
-  context.bezierCurveTo(625, 650, 300, 650, 230, 480);
-  context.closePath();
-  context.stroke();
-  context.beginPath();
-  context.moveTo(245, 245);
-  context.lineTo(205, 82);
-  context.lineTo(350, 158);
-  context.stroke();
-  context.beginPath();
-  context.moveTo(570, 158);
-  context.lineTo(715, 82);
-  context.lineTo(680, 250);
-  context.stroke();
-  ellipse(context, 360, 330, 43, 58);
-  ellipse(context, 560, 330, 43, 58);
-  ellipse(context, 460, 430, 37, 28);
-  context.beginPath();
-  context.moveTo(460, 456);
-  context.bezierCurveTo(420, 515, 385, 474, 360, 482);
-  context.moveTo(460, 456);
-  context.bezierCurveTo(500, 515, 535, 474, 560, 482);
-  context.stroke();
-  [350, 405, 515, 570].forEach((y, index) => {
-    context.beginPath();
-    context.moveTo(index < 2 ? 330 : 590, 440 + (index % 2) * 40);
-    context.lineTo(index < 2 ? 120 : 800, y + 120);
-    context.stroke();
+  closedPath(context, () => {
+    context.moveTo(146, 420);
+    context.quadraticCurveTo(155, 340, 247, 324);
+    context.lineTo(326, 220);
+    context.quadraticCurveTo(354, 180, 412, 180);
+    context.lineTo(575, 180);
+    context.quadraticCurveTo(628, 183, 654, 226);
+    context.lineTo(714, 326);
+    context.quadraticCurveTo(798, 343, 808, 422);
+    context.lineTo(808, 526);
+    context.lineTo(148, 526);
   });
-  context.beginPath();
-  context.moveTo(120, 630);
-  context.lineTo(800, 630);
-  context.stroke();
-}
-
-function drawCafe(context: CanvasRenderingContext2D) {
-  setupLineContext(context);
-  context.beginPath();
-  context.roundRect(245, 215, 380, 285, 32);
-  context.stroke();
-  ellipse(context, 435, 505, 260, 48);
-  context.beginPath();
-  context.moveTo(625, 278);
-  context.bezierCurveTo(800, 240, 800, 455, 624, 438);
-  context.stroke();
-  context.beginPath();
-  context.moveTo(315, 215);
-  context.bezierCurveTo(310, 145, 375, 150, 370, 88);
-  context.moveTo(445, 215);
-  context.bezierCurveTo(440, 145, 505, 150, 500, 88);
-  context.stroke();
-  context.beginPath();
-  context.moveTo(148, 603);
-  context.bezierCurveTo(180, 500, 306, 505, 348, 600);
-  context.bezierCurveTo(305, 645, 185, 655, 148, 603);
-  context.closePath();
-  context.stroke();
-  for (let cut = 0; cut < 4; cut += 1) {
-    context.beginPath();
-    context.moveTo(185 + cut * 38, 535);
-    context.lineTo(168 + cut * 41, 625);
-    context.stroke();
-  }
-  context.beginPath();
-  context.moveTo(90, 680);
-  context.lineTo(830, 680);
-  context.stroke();
-}
-
-function drawLandscape(context: CanvasRenderingContext2D) {
-  setupLineContext(context);
-  ellipse(context, 720, 145, 72, 72);
-  context.beginPath();
-  context.moveTo(80, 440);
-  context.lineTo(275, 180);
-  context.lineTo(420, 370);
-  context.lineTo(550, 140);
-  context.lineTo(830, 448);
-  context.closePath();
-  context.stroke();
-  context.beginPath();
-  context.moveTo(80, 440);
-  context.bezierCurveTo(250, 405, 330, 490, 470, 445);
-  context.bezierCurveTo(615, 400, 710, 480, 840, 440);
-  context.lineTo(840, 665);
-  context.bezierCurveTo(660, 610, 545, 700, 375, 635);
-  context.bezierCurveTo(245, 585, 160, 670, 80, 620);
-  context.closePath();
-  context.stroke();
-  context.beginPath();
-  context.moveTo(485, 445);
-  context.bezierCurveTo(465, 520, 545, 555, 505, 650);
-  context.stroke();
-  context.beginPath();
-  context.arc(155, 155, 48, Math.PI * 0.1, Math.PI * 1.1);
-  context.arc(225, 142, 68, Math.PI * 0.1, Math.PI);
-  context.arc(305, 166, 48, Math.PI, Math.PI * 1.88);
-  context.stroke();
-}
-
-function drawSweets(context: CanvasRenderingContext2D) {
-  setupLineContext(context);
-  context.beginPath();
-  context.moveTo(210, 280);
-  context.lineTo(620, 230);
-  context.lineTo(735, 580);
-  context.lineTo(250, 620);
-  context.closePath();
-  context.stroke();
-  context.beginPath();
-  context.moveTo(210, 280);
-  context.bezierCurveTo(320, 140, 515, 140, 620, 230);
-  context.stroke();
-  context.beginPath();
-  context.moveTo(228, 370);
-  context.lineTo(650, 328);
-  context.moveTo(242, 480);
-  context.lineTo(690, 440);
-  context.stroke();
-  [
-    [310, 208],
-    [418, 180],
-    [530, 202],
-  ].forEach(([x, y]) => {
-    ellipse(context, x, y, 44, 34, -0.2);
-    context.beginPath();
-    context.moveTo(x, y - 34);
-    context.bezierCurveTo(x - 8, y - 83, x + 30, y - 95, x + 42, y - 115);
-    context.stroke();
+  closedPath(context, () => {
+    context.moveTo(345, 239);
+    context.lineTo(432, 239);
+    context.lineTo(432, 326);
+    context.lineTo(285, 326);
   });
-  ellipse(context, 470, 632, 330, 38);
+  closedPath(context, () => {
+    context.moveTo(462, 239);
+    context.lineTo(568, 239);
+    context.lineTo(630, 326);
+    context.lineTo(462, 326);
+  });
+  ellipse(context, 292, 526, 78, 78);
+  ellipse(context, 292, 526, 31, 31);
+  ellipse(context, 664, 526, 78, 78);
+  ellipse(context, 664, 526, 31, 31);
+  ellipse(context, 724, 408, 35, 25);
+  context.beginPath();
+  context.moveTo(176, 454);
+  context.lineTo(780, 454);
+  context.stroke();
 }
 
-function drawGeometry(context: CanvasRenderingContext2D) {
+function drawCake(context: CanvasRenderingContext2D) {
   setupLineContext(context);
-  context.lineWidth = 6;
-  for (let ring = 0; ring < 5; ring += 1) {
-    ellipse(context, 460, 360, 80 + ring * 72, 80 + ring * 53, ring * 0.1);
-  }
-  for (let ray = 0; ray < 12; ray += 1) {
-    const angle = (ray / 12) * Math.PI * 2;
-    context.beginPath();
-    context.moveTo(460 + Math.cos(angle) * 48, 360 + Math.sin(angle) * 48);
-    context.lineTo(460 + Math.cos(angle) * 390, 360 + Math.sin(angle) * 310);
-    context.stroke();
-  }
-  context.strokeRect(66, 62, 788, 596);
+  ellipse(context, 460, 650, 310, 42);
+  context.beginPath();
+  context.roundRect(210, 390, 500, 220, 34);
+  context.closePath();
+  context.stroke();
+  context.beginPath();
+  context.roundRect(270, 250, 380, 175, 32);
+  context.closePath();
+  context.stroke();
+  closedPath(context, () => {
+    context.moveTo(270, 307);
+    context.bezierCurveTo(318, 345, 340, 277, 385, 316);
+    context.bezierCurveTo(430, 355, 464, 280, 505, 318);
+    context.bezierCurveTo(550, 356, 590, 286, 650, 309);
+    context.lineTo(650, 250);
+    context.lineTo(270, 250);
+  });
+  closedPath(context, () => {
+    context.moveTo(460, 211);
+    context.bezierCurveTo(390, 177, 406, 92, 460, 72);
+    context.bezierCurveTo(514, 92, 530, 177, 460, 211);
+  });
+  closedPath(context, () => {
+    context.moveTo(456, 84);
+    context.quadraticCurveTo(425, 40, 386, 65);
+    context.quadraticCurveTo(415, 98, 456, 102);
+  });
+  closedPath(context, () => {
+    context.moveTo(464, 84);
+    context.quadraticCurveTo(495, 40, 534, 65);
+    context.quadraticCurveTo(505, 98, 464, 102);
+  });
+  ellipse(context, 360, 500, 42, 42);
+  ellipse(context, 460, 500, 42, 42);
+  ellipse(context, 560, 500, 42, 42);
 }
 
-const DRAW_TEMPLATE: Record<Exclude<TemplateId, "upload">, (ctx: CanvasRenderingContext2D) => void> = {
+const DRAW_TEMPLATE: Record<
+  Exclude<TemplateId, "upload">,
+  (ctx: CanvasRenderingContext2D) => void
+> = {
+  bear: drawBear,
+  rabbit: drawRabbit,
+  ribbon: drawRibbon,
   flower: drawFlower,
-  animal: drawAnimal,
-  cafe: drawCafe,
-  landscape: drawLandscape,
-  sweets: drawSweets,
-  geometry: drawGeometry,
+  car: drawCar,
+  cake: drawCake,
 };
 
 async function loadImage(dataUrl: string) {
@@ -446,14 +517,16 @@ export function ColoringStudio({
   colorName,
   onOpenPalette,
 }: ColoringStudioProps) {
-  const [template, setTemplate] = useState<TemplateId>("flower");
+  const [template, setTemplate] = useState<TemplateId>("bear");
   const [paintMode, setPaintMode] = useState<"fill" | "brush">("fill");
   const [tolerance, setTolerance] = useState(28);
   const [gapGuard, setGapGuard] = useState(2);
   const [brushSize, setBrushSize] = useState(34);
   const [uploadedImage, setUploadedImage] = useState<string>();
   const [uploadedImageId, setUploadedImageId] = useState<string>();
-  const [status, setStatus] = useState("花の線画を選択中");
+  const [status, setStatus] = useState("くまの線画を選択中");
+  const [zoom, setZoom] = useState(100);
+  const [panEnabled, setPanEnabled] = useState(false);
   const [settingsHydrated, setSettingsHydrated] = useState(false);
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
   const mobileInspector = useRef<HTMLElement>(null);
@@ -472,6 +545,27 @@ export function ColoringStudio({
     undo: 0,
     redo: 0,
   });
+  const {
+    viewportRef,
+    stageStyle,
+    changeZoomAroundCenter,
+  } = useCanvasViewport({
+    intrinsicWidth: WIDTH,
+    intrinsicHeight: HEIGHT,
+    zoom,
+  });
+  const { handlers: panHandlers, isPanning } = useCanvasPan(
+    viewportRef,
+    panEnabled,
+  );
+
+  const changeZoom = useCallback(
+    (nextZoom: number) => {
+      if (nextZoom <= 100) setPanEnabled(false);
+      changeZoomAroundCenter(nextZoom, setZoom);
+    },
+    [changeZoomAroundCenter],
+  );
 
   const refreshHistory = useCallback(() => {
     setHistoryAvailability({
@@ -509,7 +603,7 @@ export function ColoringStudio({
           setTemplate(
             isSafeStoredImageDataUrl(stored.uploadedImage)
               ? "upload"
-              : "flower",
+              : "bear",
           );
         } else if (TEMPLATES.some((entry) => entry.id === stored.template)) {
           setTemplate(stored.template);
@@ -555,7 +649,7 @@ export function ColoringStudio({
       ? uploadedImageId
         ? `progress-upload-${uploadedImageId}`
         : undefined
-      : `progress-${template}`;
+      : `progress-v2-${template}`;
 
   const redrawTemplate = useCallback(
     async (restore = true) => {
@@ -618,8 +712,20 @@ export function ColoringStudio({
   const canvasPoint = (event: React.PointerEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     return {
-      x: ((event.clientX - rect.left) / rect.width) * WIDTH,
-      y: ((event.clientY - rect.top) / rect.height) * HEIGHT,
+      x: Math.max(
+        0,
+        Math.min(
+          WIDTH - 1,
+          ((event.clientX - rect.left) / Math.max(1, rect.width)) * WIDTH,
+        ),
+      ),
+      y: Math.max(
+        0,
+        Math.min(
+          HEIGHT - 1,
+          ((event.clientY - rect.top) / Math.max(1, rect.height)) * HEIGHT,
+        ),
+      ),
     };
   };
 
@@ -714,6 +820,7 @@ export function ColoringStudio({
   };
 
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (panEnabled) return;
     const canvas = fillCanvas.current;
     const line = lineCanvas.current;
     const context = canvas?.getContext("2d", { willReadFrequently: true });
@@ -927,7 +1034,7 @@ export function ColoringStudio({
         <aside className="template-rail" aria-label="線画テンプレート">
           <div className="template-rail__heading">
             <p className="eyebrow">線画を選ぶ</p>
-            <h2>6つの絵</h2>
+            <h2>{TEMPLATES.length}つの絵</h2>
           </div>
           <div className="template-grid">
             {TEMPLATES.map((entry) => {
@@ -938,6 +1045,7 @@ export function ColoringStudio({
                   type="button"
                   className={template === entry.id ? "is-selected" : ""}
                   aria-pressed={template === entry.id}
+                  data-testid={`coloring-template-${entry.id}`}
                   onClick={() => selectTemplate(entry.id)}
                 >
                   <span>
@@ -992,28 +1100,56 @@ export function ColoringStudio({
         </aside>
 
         <section className="coloring-paper-shell" aria-label="ぬりえキャンバス">
+          <CanvasZoomControls
+            label="ぬりえキャンバス"
+            zoom={zoom}
+            panEnabled={panEnabled}
+            onZoomChange={changeZoom}
+            onPanEnabledChange={setPanEnabled}
+          />
           <div
-            className="coloring-paper"
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-            onPointerCancel={handlePointerUp}
-            data-testid="coloring-canvas"
+            ref={viewportRef}
+            className={`canvas-viewport ${panEnabled ? "is-pan-enabled" : ""} ${isPanning ? "is-panning" : ""}`}
+            role="region"
+            aria-label="ぬりえキャンバスの表示領域"
+            tabIndex={0}
+            data-testid="coloring-viewport"
+            {...panHandlers}
           >
-            <canvas
-              ref={fillCanvas}
-              width={WIDTH}
-              height={HEIGHT}
-              className="coloring-layer coloring-layer--fill"
-              aria-hidden="true"
-            />
-            <canvas
-              ref={lineCanvas}
-              width={WIDTH}
-              height={HEIGHT}
-              className="coloring-layer coloring-layer--line"
-              aria-hidden="true"
-            />
+            <div className="canvas-scroll-content">
+              <div
+                className="canvas-zoom-stage"
+                style={{
+                  ...stageStyle,
+                  "--canvas-zoom": zoom,
+                } as React.CSSProperties}
+                data-testid="coloring-zoom-stage"
+              >
+                <div
+                  className="coloring-paper"
+                  onPointerDown={handlePointerDown}
+                  onPointerMove={handlePointerMove}
+                  onPointerUp={handlePointerUp}
+                  onPointerCancel={handlePointerUp}
+                  data-testid="coloring-canvas"
+                >
+                  <canvas
+                    ref={fillCanvas}
+                    width={WIDTH}
+                    height={HEIGHT}
+                    className="coloring-layer coloring-layer--fill"
+                    aria-hidden="true"
+                  />
+                  <canvas
+                    ref={lineCanvas}
+                    width={WIDTH}
+                    height={HEIGHT}
+                    className="coloring-layer coloring-layer--line"
+                    aria-hidden="true"
+                  />
+                </div>
+              </div>
+            </div>
           </div>
           <p className="canvas-status-message" aria-live="polite">
             {status}

@@ -50,6 +50,35 @@ test("水は重なった地点だけの水分比率と透明度へ反映され�
   assert.ok(dry.mixed.opacity > wet.mixed.opacity);
 });
 
+test("乾いた絵の具は濃く、水を置いた場所だけ薄く広がる", () => {
+  const dryState = {
+    recipe: { red: 1, blue: 0, yellow: 0, white: 0, water: 0 },
+    steps: [step("red", "red", 0.5, 0.5)],
+    mixGestures: [],
+  };
+  const wetState = {
+    recipe: { ...dryState.recipe, water: 1 },
+    steps: [
+      ...dryState.steps,
+      step("water", "water", 0.5, 0.5),
+    ],
+    mixGestures: [],
+  };
+
+  const dryCentre = sampleSpatialPaint(dryState, 0.5, 0.5);
+  const wetCentre = sampleSpatialPaint(wetState, 0.5, 0.5);
+  const dryEdge = sampleSpatialPaint(dryState, 0.575, 0.5);
+  const wetEdge = sampleSpatialPaint(wetState, 0.575, 0.5);
+  const dryDeposit = dryCentre.coverage * dryCentre.mixed.opacity;
+  const wetDeposit = wetCentre.coverage * wetCentre.mixed.opacity;
+
+  assert.ok(dryCentre.coverage >= 0.95, dryCentre.coverage);
+  assert.ok(wetDeposit <= dryDeposit * 0.55, `${dryDeposit} -> ${wetDeposit}`);
+  assert.equal(dryEdge.coverage, 0);
+  assert.ok(wetEdge.coverage > 0);
+  assert.ok(wetEdge.mixed.opacity < wetCentre.mixed.opacity);
+});
+
 test("遠くの水は手混ぜ軌跡へ持ち込まれない", () => {
   const state = {
     recipe: { red: 1, blue: 0, yellow: 0, white: 0, water: 1 },

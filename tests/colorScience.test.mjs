@@ -95,6 +95,20 @@ test("水は白として混ざらず、色相を保ちながら透明度を上�
   assert.equal(wash.waterRatio, 0.667);
 });
 
+test("水なしは濃い絵の具になり、水を加えた時だけ水彩になる", () => {
+  const bodyPaint = mixPaint({ red: 1 });
+  const watercolour = mixPaint({ red: 1, water: 1 });
+
+  assert.ok(bodyPaint.opacity >= 0.95, bodyPaint.opacity);
+  assert.equal(watercolour.hex, bodyPaint.hex);
+  assert.ok(
+    bodyPaint.opacity - watercolour.opacity >= 0.45,
+    `${bodyPaint.opacity} -> ${watercolour.opacity}`,
+  );
+  assert.ok(watercolour.spread > bodyPaint.spread);
+  assert.ok(watercolour.viscosity < bodyPaint.viscosity);
+});
+
 test("全体比率と水を除いた顔料比率を別々に返す", () => {
   const colour = calculatePaintColor({
     red: 3,

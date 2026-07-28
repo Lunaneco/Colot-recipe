@@ -377,7 +377,7 @@ test("ぬりえの閉じた領域を塗り、PNGとしてダウンロードで�
     .poll(() => pixelAt(fillCanvas, 0, 0))
     .toEqual([255, 253, 248, 255]);
 
-  const centerBefore = await pixelAt(fillCanvas, 440, 130);
+  const centerBefore = await pixelAt(fillCanvas, 460, 210);
   const outsideBefore = await pixelAt(fillCanvas, 0, 0);
   expect(centerBefore).toEqual([255, 253, 248, 255]);
 
@@ -385,13 +385,13 @@ test("ぬりえの閉じた領域を塗り、PNGとしてダウンロードで�
   expect(box).not.toBeNull();
   await coloringCanvas.click({
     position: {
-      x: (box!.width * 440) / 920,
-      y: (box!.height * 130) / 720,
+      x: (box!.width * 460) / 920,
+      y: (box!.height * 210) / 720,
     },
   });
 
   await expect
-    .poll(() => pixelAt(fillCanvas, 440, 130))
+    .poll(() => pixelAt(fillCanvas, 460, 210))
     .not.toEqual(centerBefore);
   await expect
     .poll(() => pixelAt(fillCanvas, 0, 0))
@@ -407,7 +407,7 @@ test("ぬりえの閉じた領域を塗り、PNGとしてダウンロードで�
   const download = await downloadPromise;
 
   expect(download.suggestedFilename()).toBe(
-    "カラーレシピぬりえ-flower.png",
+    "カラーレシピぬりえ-bear.png",
   );
   const stream = await download.createReadStream();
   expect(stream).not.toBeNull();
@@ -420,6 +420,128 @@ test("ぬりえの閉じた領域を塗り、PNGとしてダウンロードで�
   const png = Buffer.concat(chunks);
   expect(png.length).toBeGreaterThan(8);
   expect(png.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
+});
+
+test("くま・うさぎ・リボンを含む太い線画を枠ごとに塗れる", async ({
+  page,
+}) => {
+  await page.getByTestId("mode-color").click();
+  const coloringCanvas = page.getByTestId("coloring-canvas");
+  const fillCanvas = coloringCanvas.locator("canvas.coloring-layer--fill");
+  const templates = [
+    ["bear", "くま", 460, 210],
+    ["rabbit", "うさぎ", 435, 245],
+    ["ribbon", "リボン", 255, 310],
+    ["flower", "おはな", 460, 157],
+    ["car", "くるま", 385, 280],
+    ["cake", "ケーキ", 460, 355],
+  ] as const;
+
+  for (const [id, label, x, y] of templates) {
+    const button = page.getByTestId(`coloring-template-${id}`);
+    await button.click();
+    await expect(button).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByText(`${label}の線画を選択中`)).toBeVisible();
+    await expect
+      .poll(() => pixelAt(fillCanvas, x, y))
+      .toEqual([255, 253, 248, 255]);
+
+    const before = await pixelAt(fillCanvas, x, y);
+    const outside = await pixelAt(fillCanvas, 20, 20);
+    await clickCanvasPoint(coloringCanvas, x, y);
+    await expect.poll(() => pixelAt(fillCanvas, x, y)).not.toEqual(before);
+    await expect.poll(() => pixelAt(fillCanvas, 20, 20)).toEqual(outside);
+
+    await page.getByRole("button", { name: "戻す", exact: true }).click();
+    await expect.poll(() => pixelAt(fillCanvas, x, y)).toEqual(before);
+  }
+});
+
+test("おえかきとぬりえは表示だけを拡大縮小し、拡大後も正しい位置を塗れる", async ({
+  page,
+}) => {
+  await page.getByTestId("mode-draw").click();
+  const drawingStage = page.getByTestId("drawing-zoom-stage");
+  const drawingCanvas = page.getByTestId("drawing-canvas");
+  const drawingLayer = drawingCanvas.locator("canvas").first();
+  const drawingViewport = page.getByTestId("drawing-viewport");
+  const drawingMove = page.getByRole("button", {
+    name: "おえかきキャンバスを移動",
+  });
+  await expect(
+    page.getByLabel("おえかきキャンバスの表示倍率"),
+  ).toHaveText("100%");
+  await expect(drawingMove).toBeDisabled();
+  const drawingBefore = await drawingStage.boundingBox();
+  expect(drawingBefore).not.toBeNull();
+
+  await page
+    .getByRole("button", { name: "おえかきキャンバスを拡大" })
+    .click();
+  await expect(
+    page.getByLabel("おえかきキャンバスの表示倍率"),
+  ).toHaveText("125%");
+  await expect(drawingMove).toBeEnabled();
+  const drawingAfter = await drawingStage.boundingBox();
+  expect(drawingAfter).not.toBeNull();
+  expect(drawingAfter!.width / drawingBefore!.width).toBeCloseTo(1.25, 1);
+  await expect(drawingLayer).toHaveAttribute("width", "1000");
+  await expect(drawingLayer).toHaveAttribute("height", "700");
+
+  const drawingPixelBefore = await pixelAt(drawingLayer, 500, 350);
+  await drawingCanvas.click({
+    position: {
+      x: drawingAfter!.width / 2,
+      y: drawingAfter!.height / 2,
+    },
+  });
+  await expect
+    .poll(() => pixelAt(drawingLayer, 500, 350))
+    .not.toEqual(drawingPixelBefore);
+  await drawingMove.click();
+  await expect(drawingMove).toHaveAttribute("aria-pressed", "true");
+  await drawingViewport.focus();
+  const scrollLeftBefore = await drawingViewport.evaluate(
+    (element) => element.scrollLeft,
+  );
+  await drawingViewport.press("ArrowRight");
+  await expect
+    .poll(() =>
+      drawingViewport.evaluate((element) => element.scrollLeft),
+    )
+    .toBeGreaterThan(scrollLeftBefore);
+  await page
+    .getByRole("button", { name: "おえかきキャンバスを全体表示に戻す" })
+    .click();
+  await expect(
+    page.getByLabel("おえかきキャンバスの表示倍率"),
+  ).toHaveText("100%");
+  await expect(drawingMove).toBeDisabled();
+  await expect(drawingMove).toHaveAttribute("aria-pressed", "false");
+
+  await page.getByTestId("mode-color").click();
+  const coloringStage = page.getByTestId("coloring-zoom-stage");
+  const coloringCanvas = page.getByTestId("coloring-canvas");
+  const fillCanvas = coloringCanvas.locator("canvas.coloring-layer--fill");
+  const coloringBefore = await coloringStage.boundingBox();
+  expect(coloringBefore).not.toBeNull();
+  await page
+    .getByRole("button", { name: "ぬりえキャンバスを拡大" })
+    .click();
+  await expect(
+    page.getByLabel("ぬりえキャンバスの表示倍率"),
+  ).toHaveText("125%");
+  const coloringAfter = await coloringStage.boundingBox();
+  expect(coloringAfter).not.toBeNull();
+  expect(coloringAfter!.width / coloringBefore!.width).toBeCloseTo(1.25, 1);
+  await expect(fillCanvas).toHaveAttribute("width", "920");
+  await expect(fillCanvas).toHaveAttribute("height", "720");
+
+  const fillBefore = await pixelAt(fillCanvas, 460, 210);
+  await clickCanvasPoint(coloringCanvas, 460, 210);
+  await expect
+    .poll(() => pixelAt(fillCanvas, 460, 210))
+    .not.toEqual(fillBefore);
 });
 
 test("大きすぎる画像と偽装画像を線画として保存しない", async ({ page }) => {

@@ -433,8 +433,10 @@ export function mixPaint(recipeInput: PaintRecipe = {}): MixedPaintColor {
   const concentration =
     pigmentUnits / (pigmentUnits + recipe.water * 1.45);
   const opticalLoad = colouredUnits * 1.05 + recipe.white * 1.55;
-  const dryCoverage = 1 - Math.exp(-opticalLoad);
-  const opacity = dryCoverage * (0.04 + 0.96 * concentration ** 0.72);
+  // One dry unit should already behave like body paint. Water then lowers the
+  // pigment concentration into a translucent wash without changing its hue.
+  const dryCoverage = 1 - Math.exp(-opticalLoad * 3);
+  const opacity = dryCoverage * (0.03 + 0.97 * concentration ** 0.8);
   const colourShare = colouredUnits / pigmentUnits;
   const chroma = hsl.s / 100;
   const intensity =

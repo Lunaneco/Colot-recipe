@@ -270,92 +270,6 @@ function drawPaintDab(
   context.restore();
 }
 
-function drawMixGesture(
-  context: CanvasRenderingContext2D,
-  gesture: MixGesture,
-  mixed: MixedColorSnapshot,
-  index: number,
-  canvasHeight: number,
-) {
-  if (gesture.kind === "all") {
-    const centerX = CANVAS_WIDTH * 0.5;
-    const centerY = canvasHeight * 0.51;
-    const passes = 10;
-    context.save();
-    context.globalCompositeOperation = "multiply";
-    for (let pass = 0; pass < passes; pass += 1) {
-      const phase = pass / passes;
-      const x =
-        centerX + Math.sin(pass * 2.07) * (42 + phase * 22);
-      const y = centerY + Math.cos(pass * 1.41) * (24 + phase * 18);
-      context.beginPath();
-      context.fillStyle = hexToRgba(mixed.hex, 0.07 + phase * 0.012);
-      context.ellipse(
-        x,
-        y,
-        165 + hashNoise(pass + 24) * 48,
-        82 + hashNoise(pass + 48) * 34,
-        Math.sin(pass) * 0.16,
-        0,
-        Math.PI * 2,
-      );
-      context.fill();
-    }
-    context.restore();
-
-    const blended = context.createRadialGradient(
-      centerX - 42,
-      centerY - 34,
-      8,
-      centerX,
-      centerY,
-      220,
-    );
-    blended.addColorStop(0, hexToRgba(mixed.hex, 0.66));
-    blended.addColorStop(0.52, hexToRgba(mixed.hex, 0.4));
-    blended.addColorStop(0.84, hexToRgba(mixed.hex, 0.17));
-    blended.addColorStop(1, hexToRgba(mixed.hex, 0));
-    context.save();
-    context.fillStyle = blended;
-    context.shadowColor = hexToRgba(mixed.hex, 0.14);
-    context.shadowBlur = 22;
-    context.beginPath();
-    context.ellipse(centerX, centerY, 232, 135, -0.08, 0, Math.PI * 2);
-    context.fill();
-    context.restore();
-    return;
-  }
-
-  const path = gesture.path ?? [];
-  if (path.length < 2) return;
-  context.save();
-  context.lineCap = "round";
-  context.lineJoin = "round";
-  context.strokeStyle = hexToRgba(
-    mixed.hex,
-    0.2 + Math.min(0.28, gesture.distance / 1300),
-  );
-  context.lineWidth = Math.max(
-    26,
-    Math.min(140, 50 + gesture.speed * 0.18),
-  );
-  context.beginPath();
-  path.forEach((point, pointIndex) => {
-    const x = point.x * CANVAS_WIDTH;
-    const y = point.y * canvasHeight;
-    if (pointIndex === 0) context.moveTo(x, y);
-    else {
-      const jitter = (hashNoise(index * 71 + pointIndex) - 0.5) * 5;
-      context.lineTo(x + jitter, y - jitter);
-    }
-  });
-  context.stroke();
-  context.strokeStyle = "rgba(255,255,255,.08)";
-  context.lineWidth *= 0.3;
-  context.stroke();
-  context.restore();
-}
-
 function drawSpatialMixField(
   context: CanvasRenderingContext2D,
   state: MixerState,
@@ -364,7 +278,7 @@ function drawSpatialMixField(
   if (state.steps.length === 0 && state.mixGestures.length === 0) return;
   const complexity = state.steps.length + state.mixGestures.length * 4;
   const targetPixels =
-    complexity > 96 ? 14_000 : complexity > 48 ? 22_000 : 40_000;
+    complexity > 96 ? 24_000 : complexity > 48 ? 38_000 : 68_000;
   const aspectRatio = CANVAS_WIDTH / canvasHeight;
   const fieldWidth = Math.max(
     112,
@@ -378,14 +292,8 @@ function drawSpatialMixField(
   field.width = fieldWidth;
   field.height = fieldHeight;
   const fieldContext = field.getContext("2d");
-  const wetField = document.createElement("canvas");
-  wetField.width = fieldWidth;
-  wetField.height = fieldHeight;
-  const wetContext = wetField.getContext("2d");
-  if (!fieldContext || !wetContext) return;
+  if (!fieldContext) return;
   const pixels = fieldContext.createImageData(fieldWidth, fieldHeight);
-  const wetPixels = wetContext.createImageData(fieldWidth, fieldHeight);
-  let hasWetPaint = false;
   const colourCache = new Map<string, SpatialPaintSample["mixed"]>();
   const sample = createSpatialPaintSampler(state, {
     width: CANVAS_WIDTH,
@@ -401,43 +309,45 @@ function drawSpatialMixField(
       );
       if (sampledPixel.coverage <= 0.002) continue;
       const offset = (y * fieldWidth + x) * 4;
+      const structureNoise = hashNoise(
+        Math.floor(x / 2) * 1.91 + Math.floor(y / 2) * 23.17,
+      );
+      const dryBody = (1 - sampledPixel.waterRatio) ** 2;
+      const edgeStart =
+        0.08 + (structureNoise - 0.5) * 0.1 * dryBody;
+      const edgeProgress = Math.min(
+        1,
+        Math.max(0, (sampledPixel.coverage - edgeStart) / 0.4),
+      );
+      const bodyCoverage =
+        edgeProgress * edgeProgress * (3 - 2 * edgeProgress);
+      const grain =
+        1 +
+        (hashNoise(x * 0.73 + y * 19.31) - 0.5) *
+          0.06 *
+          dryBody *
+          (1 - bodyCoverage);
+      const renderedCoverage = Math.min(
+        1,
+        Math.max(
+          0,
+          (sampledPixel.coverage * (1 - dryBody) +
+            bodyCoverage * dryBody) *
+            grain,
+        ),
+      );
       pixels.data[offset] = sampledPixel.mixed.rgb.r;
       pixels.data[offset + 1] = sampledPixel.mixed.rgb.g;
       pixels.data[offset + 2] = sampledPixel.mixed.rgb.b;
       pixels.data[offset + 3] = Math.round(
-        sampledPixel.coverage *
-          Math.max(0.18, sampledPixel.mixed.opacity) *
-          255 *
-          0.9,
+        renderedCoverage *
+          sampledPixel.mixed.opacity *
+          255,
       );
-      if (
-        sampledPixel.weights.water > 0 &&
-        sampledPixel.waterRatio > 0.0001
-      ) {
-        const wetAlpha = Math.min(
-          0.34,
-          sampledPixel.waterRatio *
-            Math.max(0.2, sampledPixel.coverage) *
-            0.42,
-        );
-        wetPixels.data[offset] = 0;
-        wetPixels.data[offset + 1] = 0;
-        wetPixels.data[offset + 2] = 0;
-        wetPixels.data[offset + 3] = Math.round(wetAlpha * 255);
-        hasWetPaint ||= wetAlpha > 0;
-      }
     }
   }
 
   fieldContext.putImageData(pixels, 0, 0);
-  wetContext.putImageData(wetPixels, 0, 0);
-  if (hasWetPaint) {
-    context.save();
-    context.imageSmoothingEnabled = true;
-    context.globalCompositeOperation = "destination-out";
-    context.drawImage(wetField, 0, 0, CANVAS_WIDTH, canvasHeight);
-    context.restore();
-  }
   context.save();
   context.imageSmoothingEnabled = true;
   context.globalCompositeOperation = "source-over";
@@ -662,15 +572,14 @@ export function MixingStudio({
     const context = canvas.getContext("2d");
     if (!context) return;
     context.clearRect(0, 0, CANVAS_WIDTH, canvasHeight);
-    state.steps.forEach((step, index) => {
-      drawPaintDab(context, step, index, canvasHeight);
-    });
-    state.mixGestures.forEach((gesture, index) =>
-      drawMixGesture(context, gesture, mixed, index, canvasHeight),
-    );
     drawSpatialMixField(context, state, canvasHeight);
+    state.steps.forEach((step, index) => {
+      if (step.material === "water") {
+        drawPaintDab(context, step, index, canvasHeight);
+      }
+    });
     updateTexture();
-  }, [canvasHeight, mixed, state, updateTexture]);
+  }, [canvasHeight, state, updateTexture]);
 
   useEffect(() => {
     redraw();
