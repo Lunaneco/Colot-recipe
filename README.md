@@ -2,6 +2,8 @@
 
 実際の絵の具をパレットへ置き、なぞって混ぜ、水で薄め、その配合を保存できる日本語Webアプリです。作った色は、そのまま「おえかき」と「ぬりえ」で使えます。
 
+[公開版を開く](https://lunaneco.github.io/Colot-recipe/)
+
 ![デスクトップの混色画面](./screenshots/desktop-mix.png)
 
 ## 65秒チュートリアル
@@ -44,11 +46,14 @@ npm run dev
 ## ビルドとテスト
 
 ```bash
-# 型、Lint、単体テスト、ビルド、SSRスモークテスト
+# 型、Lint、単体テスト、静的ビルド検査
 npm test
 
-# E2Eテスト（テスト用サーバーも自動起動）
+# E2Eテスト（開発サーバーも自動起動）
 npm run test:e2e
+
+# GitHub Pagesと同じサブパスの静的ビルドでE2Eテスト
+npm run test:e2e:static
 
 # 個別実行
 npm run typecheck
@@ -210,15 +215,18 @@ npm run screenshots
 - 色、設定、作品、塗り絵はブラウザのIndexedDBとLocalStorageへ保存します。
 - 読み込む線画はPNG・JPEG・WebP、8MB以下、最大8192px・3200万画素に制限し、固定サイズのPNGへ再描画して位置情報などの画像メタデータを除去します。
 - 全データ復元は、外部URL、SVG画像、過大画像、未対応キャンバス、過剰レイヤー、安全でないオブジェクトキーを、保存前にまとめて拒否します。
-- CSP、クリックジャッキング防止、MIMEスニッフィング防止、権限無効化などのレスポンスヘッダーを設定します。
-- `NEXT_PUBLIC_SITE_URL` は公開URLだけに使用する非秘密値です。秘密情報はリポジトリや `.env.example` に記録しないでください。
+- 外部送信を止めるCSPとReferrer Policyを `index.html` に設定し、GitHub PagesのHTTPS配信だけを利用します。
+- GitHub Pagesでは任意のレスポンスヘッダーを追加できないため、CSPで可能な範囲を防御しています。`frame-ancestors`、Permissions Policy、COOP/CORPなどの独自ヘッダーが必要な場合は、専用ドメインとヘッダーを設定できるホスティングへ移してください。
+- 実行時の環境変数や秘密情報は必要ありません。秘密情報を `VITE_*`、リポジトリ、`.env.example` に記録しないでください。
 
 詳しくは [PRIVACY.md](./PRIVACY.md)、脆弱性の報告方法は [SECURITY.md](./SECURITY.md)、公開前の確認項目は [PUBLISHING.md](./PUBLISHING.md) を参照してください。
 
 ## フォルダ構成
 
 ```text
-app/                  画面本体、メタデータ、全体スタイル
+index.html            GitHub Pagesへ配信する静的HTMLとメタデータ
+main.tsx              Reactアプリの起動処理
+app/                  画面本体、全体スタイル
 components/           混色・描画・塗り絵・保存パレット・ダイアログ
 lib/
   colorScience.ts     分光／Kubelka–Munk近似
@@ -228,11 +236,17 @@ lib/
   storage.ts          多重保存と全データバックアップ
   types.ts            レシピ、保存色、ツールの型
   useHistory.ts       安定したUndo／Redo履歴
-tests/                単体、SSR、Playwright E2E
+tests/                単体、静的HTML、Playwright E2E
 screenshots/          PC・スマートフォンの確認画像
 public/og.png         共有用プレビュー画像
 public/tutorial/       ナレーション・字幕付きチュートリアル
 ```
+
+## GitHub Pagesへの公開
+
+`main`へ取り込まれた変更は、`.github/workflows/pages.yml` が検証済みの `dist/` だけをGitHub Pagesへ配信します。公開先は <https://lunaneco.github.io/Colot-recipe/> です。外部Actionはコミット番号で固定し、公開ジョブには必要最小限の権限だけを与えています。
+
+ローカル版と公開版は保存領域が別です。ローカル版の色や作品を移す場合は「全データ保存」でJSONを書き出し、公開版の「全データ復元」で読み込んでください。
 
 ## 操作の補助
 
@@ -247,6 +261,7 @@ public/tutorial/       ナレーション・字幕付きチュートリアル
 
 - 顔料モデルは一般的な画材の挙動を狙った近似で、特定メーカーの実測スペクトルを校正したものではありません。
 - 保存は端末ローカルで、複数端末間の同期や共同編集はありません。
+- GitHub Pagesのプロジェクトサイトは同じ `lunaneco.github.io` オリジンを共有します。制作データの厳密なサイト分離が必要な場合は、このアプリ専用のカスタムドメインを使ってください。
 - 筆圧はPointer Eventsで値を提供するペン／端末に依存します。
 - WebGLが利用できない環境では、混色面はCanvas 2Dの軽量表示へ切り替わります。
 - 読み込んだ線画の線が極端に薄い場合は、領域判定の前に画像側のコントラスト調整が必要な場合があります。

@@ -1,5 +1,3 @@
-"use client";
-
 import {
   Beaker,
   BookOpen,
@@ -13,8 +11,15 @@ import {
   Undo2,
   X,
 } from "lucide-react";
-import dynamic from "next/dynamic";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { ColorDetailDialog, SaveColorDialog } from "../components/ColorDialogs";
 import { MixingStudio } from "../components/MixingStudio";
 import { SavedPalette } from "../components/SavedPalette";
@@ -50,21 +55,18 @@ import {
 } from "../lib/types";
 import { useHistory } from "../lib/useHistory";
 
-const DrawingStudio = dynamic(
-  () => import("../components/DrawingStudio").then((module) => module.DrawingStudio),
-  {
-    ssr: false,
-    loading: () => <div className="mode-loading">おえかきの道具を準備しています…</div>,
-  },
+const TUTORIAL_BASE_URL = `${import.meta.env.BASE_URL}tutorial/`;
+
+const DrawingStudio = lazy(() =>
+  import("../components/DrawingStudio").then((module) => ({
+    default: module.DrawingStudio,
+  })),
 );
 
-const ColoringStudio = dynamic(
-  () =>
-    import("../components/ColoringStudio").then((module) => module.ColoringStudio),
-  {
-    ssr: false,
-    loading: () => <div className="mode-loading">ぬりえを準備しています…</div>,
-  },
+const ColoringStudio = lazy(() =>
+  import("../components/ColoringStudio").then((module) => ({
+    default: module.ColoringStudio,
+  })),
 );
 
 type MixerState = {
@@ -961,16 +963,22 @@ export default function ColorRecipeApp() {
             hidden={mode !== "draw"}
           >
             {mode === "draw" && (
-              <DrawingStudio
-                color={activeDrawingColor}
-                colorName={activeDrawingColorName}
-                onOpenPalette={openOrFocusPalette}
-                onSampleColor={(hex) => {
-                  setSampledColor(snapshotFromHex(hex));
-                  setActiveColorId(undefined);
-                  showToast("スポイトで色を取りました");
-                }}
-              />
+              <Suspense
+                fallback={
+                  <div className="mode-loading">おえかきの道具を準備しています…</div>
+                }
+              >
+                <DrawingStudio
+                  color={activeDrawingColor}
+                  colorName={activeDrawingColorName}
+                  onOpenPalette={openOrFocusPalette}
+                  onSampleColor={(hex) => {
+                    setSampledColor(snapshotFromHex(hex));
+                    setActiveColorId(undefined);
+                    showToast("スポイトで色を取りました");
+                  }}
+                />
+              </Suspense>
             )}
           </section>
           <section
@@ -980,11 +988,17 @@ export default function ColorRecipeApp() {
             hidden={mode !== "color"}
           >
             {mode === "color" && (
-              <ColoringStudio
-                color={activeDrawingColor}
-                colorName={activeDrawingColorName}
-                onOpenPalette={openOrFocusPalette}
-              />
+              <Suspense
+                fallback={
+                  <div className="mode-loading">ぬりえを準備しています…</div>
+                }
+              >
+                <ColoringStudio
+                  color={activeDrawingColor}
+                  colorName={activeDrawingColorName}
+                  onOpenPalette={openOrFocusPalette}
+                />
+              </Suspense>
             )}
           </section>
         </main>
@@ -1080,15 +1094,15 @@ export default function ColorRecipeApp() {
                 controls
                 playsInline
                 preload="metadata"
-                poster="/tutorial/color-recipe-tutorial-poster.webp"
+                poster={`${TUTORIAL_BASE_URL}color-recipe-tutorial-poster.webp`}
               >
                 <source
-                  src="/tutorial/color-recipe-tutorial.mp4"
+                  src={`${TUTORIAL_BASE_URL}color-recipe-tutorial.mp4`}
                   type="video/mp4"
                 />
                 <track
                   kind="captions"
-                  src="/tutorial/color-recipe-tutorial.ja.vtt"
+                  src={`${TUTORIAL_BASE_URL}color-recipe-tutorial.ja.vtt`}
                   srcLang="ja"
                   label="日本語"
                   default

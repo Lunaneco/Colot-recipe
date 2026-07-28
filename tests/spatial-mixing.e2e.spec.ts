@@ -74,7 +74,7 @@ async function renderedScreenshotPixelAt(
 test("重なった場所をスポイトで調べると局所顔料比率が変わる", async ({
   page,
 }) => {
-  await page.goto("/");
+  await page.goto("./");
   await expect(page.locator(".color-recipe-app")).toHaveAttribute(
     "data-app-ready",
     "true",
@@ -120,7 +120,7 @@ test("スマホでもスポイトをタップした地点と局所比率がず�
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/");
+  await page.goto("./");
   await expect(page.locator(".color-recipe-app")).toHaveAttribute(
     "data-app-ready",
     "true",
@@ -143,7 +143,7 @@ test("スマホでもスポイトをタップした地点と局所比率がず�
 test("スポイトは表示中の描画色を取得し、登録・再読込後も同じ色を保つ", async ({
   page,
 }) => {
-  await page.goto("/");
+  await page.goto("./");
   await expect(page.locator(".color-recipe-app")).toHaveAttribute(
     "data-app-ready",
     "true",
@@ -246,7 +246,7 @@ test("WebGLを使えない環境でも表示中のCanvas 2D画素を取得する
       },
     });
   });
-  await page.goto("/");
+  await page.goto("./");
   await expect(page.locator(".color-recipe-app")).toHaveAttribute(
     "data-app-ready",
     "true",
@@ -281,7 +281,7 @@ test("WebGLを使えない環境でも表示中のCanvas 2D画素を取得する
 test("スポイト地点の局所レシピを登録して、もう一度つくれる", async ({
   page,
 }) => {
-  await page.goto("/");
+  await page.goto("./");
   await expect(page.locator(".color-recipe-app")).toHaveAttribute(
     "data-app-ready",
     "true",
@@ -333,7 +333,7 @@ test("スポイト地点の局所レシピを登録して、もう一度つく�
 test("スポイトが空白を示す間は登録できず、全体へ戻ると登録できる", async ({
   page,
 }) => {
-  await page.goto("/");
+  await page.goto("./");
   await expect(page.locator(".color-recipe-app")).toHaveAttribute(
     "data-app-ready",
     "true",
@@ -370,7 +370,7 @@ test("スポイトが空白を示す間は登録できず、全体へ戻ると�
 test("水は選んだ部分だけを濡らし、離れた絵の具の水分量を変えない", async ({
   page,
 }) => {
-  await page.goto("/");
+  await page.goto("./");
   await expect(page.locator(".color-recipe-app")).toHaveAttribute(
     "data-app-ready",
     "true",
