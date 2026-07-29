@@ -662,7 +662,7 @@ export function ColoringStudio({
       const lineContext = line.getContext("2d", { willReadFrequently: true });
       if (!fillContext || !lineContext) return;
       fillContext.clearRect(0, 0, WIDTH, HEIGHT);
-      fillContext.fillStyle = "#fffdf8";
+      fillContext.fillStyle = "#ffffff";
       fillContext.fillRect(0, 0, WIDTH, HEIGHT);
       lineContext.clearRect(0, 0, WIDTH, HEIGHT);
 

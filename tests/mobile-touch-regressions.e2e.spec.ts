@@ -143,6 +143,161 @@ async function touchCanvasWithJitter(
   return start;
 }
 
+async function holdCanvasAt(
+  page: Page,
+  canvas: Locator,
+  xRatio: number,
+  yRatio: number,
+  durationMs: number,
+) {
+  await withCanvasTouch(page, canvas, xRatio, yRatio, async () => {
+    await page.waitForTimeout(durationMs);
+  });
+}
+
+async function withCanvasTouch(
+  page: Page,
+  canvas: Locator,
+  xRatio: number,
+  yRatio: number,
+  whilePressed: () => Promise<void>,
+) {
+  const box = await canvas.boundingBox();
+  if (!box) throw new Error("Canvas is unavailable");
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [
+        {
+          x: box.x + box.width * xRatio,
+          y: box.y + box.height * yRatio,
+          id: 1,
+          radiusX: 1,
+          radiusY: 1,
+          force: 1,
+        },
+      ],
+    });
+    await whilePressed();
+    await session.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+  } finally {
+    await session.detach();
+  }
+}
+
+async function withCanvasTouchAfterHoldMove(
+  page: Page,
+  canvas: Locator,
+  xRatio: number,
+  yRatio: number,
+  holdDurationMs: number,
+  movement: { x: number; y: number },
+  whilePressed: () => Promise<void>,
+) {
+  const box = await canvas.boundingBox();
+  if (!box) throw new Error("Canvas is unavailable");
+  const start = {
+    x: box.x + box.width * xRatio,
+    y: box.y + box.height * yRatio,
+  };
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [
+        {
+          ...start,
+          id: 1,
+          radiusX: 1,
+          radiusY: 1,
+          force: 1,
+        },
+      ],
+    });
+    await page.waitForTimeout(holdDurationMs);
+    await session.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [
+        {
+          x: start.x + movement.x,
+          y: start.y + movement.y,
+          id: 1,
+          radiusX: 1,
+          radiusY: 1,
+          force: 1,
+        },
+      ],
+    });
+    await whilePressed();
+    await session.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+  } finally {
+    await session.detach();
+  }
+}
+
+async function holdAndDragCanvas(
+  page: Page,
+  canvas: Locator,
+  xRatio: number,
+  yRatio: number,
+  holdDurationMs: number,
+  movements: Array<{ x: number; y: number }>,
+) {
+  const box = await canvas.boundingBox();
+  if (!box) throw new Error("Canvas is unavailable");
+  const start = {
+    x: box.x + box.width * xRatio,
+    y: box.y + box.height * yRatio,
+  };
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [
+        {
+          ...start,
+          id: 1,
+          radiusX: 1,
+          radiusY: 1,
+          force: 1,
+        },
+      ],
+    });
+    await page.waitForTimeout(holdDurationMs);
+    for (const movement of movements) {
+      await session.send("Input.dispatchTouchEvent", {
+        type: "touchMove",
+        touchPoints: [
+          {
+            x: start.x + movement.x,
+            y: start.y + movement.y,
+            id: 1,
+            radiusX: 1,
+            radiusY: 1,
+            force: 1,
+          },
+        ],
+      });
+      // Keep successive samples in separate animation frames, as a real
+      // finger would, instead of allowing Chromium to coalesce the path.
+      await page.waitForTimeout(24);
+    }
+    await session.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+  } finally {
+    await session.detach();
+  }
+}
+
 async function touchElementAt(
   locator: Locator,
   xRatio: number,
@@ -210,6 +365,230 @@ async function sourcePaintCentroid(canvas: Locator) {
       return {
         x: rect.left + (weightedX / alphaTotal / source.width) * rect.width,
         y: rect.top + (weightedY / alphaTotal / source.height) * rect.height,
+      };
+    });
+}
+
+async function visibleDarkPaintCentroid(page: Page, canvas: Locator) {
+  const visibleLayer = canvas.locator("canvas.paint-layer--gloss");
+  await expect(visibleLayer).toHaveClass(/is-ready/);
+  const rect = await visibleLayer.boundingBox();
+  if (!rect) throw new Error("Visible paint layer is unavailable");
+  const png = await visibleLayer.screenshot({
+    animations: "disabled",
+    omitBackground: true,
+  });
+  const component = await page.evaluate(
+    async (base64) => {
+      const image = new Image();
+      image.src = `data:image/png;base64,${base64}`;
+      await new Promise<void>((resolve, reject) => {
+        image.onload = () => resolve();
+        image.onerror = () => reject(new Error("Screenshot decode failed"));
+      });
+      const decoded = document.createElement("canvas");
+      decoded.width = image.width;
+      decoded.height = image.height;
+      const context = decoded.getContext("2d", {
+        willReadFrequently: true,
+      });
+      if (!context) throw new Error("Screenshot canvas is unavailable");
+      context.drawImage(image, 0, 0);
+      const pixels = context.getImageData(
+        0,
+        0,
+        decoded.width,
+        decoded.height,
+      ).data;
+      const totalPixels = decoded.width * decoded.height;
+      const visited = new Uint8Array(totalPixels);
+      const queue = new Int32Array(totalPixels);
+      let largest = { area: 0, x: 0, y: 0 };
+      const isDark = (index: number) => {
+        const offset = index * 4;
+        return (
+          pixels[offset + 3] > 20 &&
+          pixels[offset] < 70 &&
+          pixels[offset + 1] < 70 &&
+          pixels[offset + 2] < 70
+        );
+      };
+
+      for (let start = 0; start < totalPixels; start += 1) {
+        if (visited[start]) continue;
+        visited[start] = 1;
+        if (!isDark(start)) continue;
+        let head = 0;
+        let tail = 0;
+        let area = 0;
+        let weightedX = 0;
+        let weightedY = 0;
+        queue[tail] = start;
+        tail += 1;
+        while (head < tail) {
+          const index = queue[head];
+          head += 1;
+          const x = index % decoded.width;
+          const y = Math.floor(index / decoded.width);
+          area += 1;
+          weightedX += x + 0.5;
+          weightedY += y + 0.5;
+          for (const next of [
+            index - 1,
+            index + 1,
+            index - decoded.width,
+            index + decoded.width,
+          ]) {
+            if (
+              next < 0 ||
+              next >= totalPixels ||
+              visited[next] ||
+              Math.abs((next % decoded.width) - x) > 1
+            ) {
+              continue;
+            }
+            visited[next] = 1;
+            if (isDark(next)) {
+              queue[tail] = next;
+              tail += 1;
+            }
+          }
+        }
+        if (area > largest.area) {
+          largest = {
+            area,
+            x: weightedX / area,
+            y: weightedY / area,
+          };
+        }
+      }
+      if (largest.area === 0) {
+        throw new Error("Visible dark paint was not found");
+      }
+      return {
+        ...largest,
+        width: decoded.width,
+        height: decoded.height,
+      };
+    },
+    png.toString("base64"),
+  );
+  return {
+    x: rect.x + (component.x / component.width) * rect.width,
+    y: rect.y + (component.y / component.height) * rect.height,
+    area: component.area,
+  };
+}
+
+async function sourcePaintBounds(canvas: Locator) {
+  return canvas
+    .locator("canvas.paint-layer--source")
+    .evaluate((element) => {
+      const source = element as HTMLCanvasElement;
+      const context = source.getContext("2d", { willReadFrequently: true });
+      if (!context) throw new Error("2D canvas context is unavailable");
+      const pixels = context.getImageData(
+        0,
+        0,
+        source.width,
+        source.height,
+      ).data;
+      let left = source.width;
+      let top = source.height;
+      let right = -1;
+      let bottom = -1;
+      for (let y = 0; y < source.height; y += 1) {
+        for (let x = 0; x < source.width; x += 1) {
+          if (pixels[(y * source.width + x) * 4 + 3] <= 3) continue;
+          left = Math.min(left, x);
+          top = Math.min(top, y);
+          right = Math.max(right, x);
+          bottom = Math.max(bottom, y);
+        }
+      }
+      if (right < left || bottom < top) return undefined;
+      return {
+        width: right - left + 1,
+        height: bottom - top + 1,
+      };
+    });
+}
+
+async function sourceAlphaAtRatio(
+  canvas: Locator,
+  xRatio: number,
+  yRatio: number,
+) {
+  return canvas
+    .locator("canvas.paint-layer--source")
+    .evaluate(
+      (element, point) => {
+        const source = element as HTMLCanvasElement;
+        const context = source.getContext("2d", {
+          willReadFrequently: true,
+        });
+        if (!context) throw new Error("2D canvas context is unavailable");
+        return context.getImageData(
+          Math.min(source.width - 1, Math.floor(source.width * point.x)),
+          Math.min(source.height - 1, Math.floor(source.height * point.y)),
+          1,
+          1,
+        ).data[3];
+      },
+      { x: xRatio, y: yRatio },
+    );
+}
+
+async function sourcePixelAtRatio(
+  canvas: Locator,
+  xRatio: number,
+  yRatio: number,
+) {
+  return canvas
+    .locator("canvas.paint-layer--source")
+    .evaluate(
+      (element, point) => {
+        const source = element as HTMLCanvasElement;
+        const context = source.getContext("2d", {
+          willReadFrequently: true,
+        });
+        if (!context) throw new Error("2D canvas context is unavailable");
+        return Array.from(
+          context.getImageData(
+            Math.min(source.width - 1, Math.floor(source.width * point.x)),
+            Math.min(source.height - 1, Math.floor(source.height * point.y)),
+            1,
+            1,
+          ).data,
+        );
+      },
+      { x: xRatio, y: yRatio },
+    );
+}
+
+async function sourcePaintDigest(canvas: Locator) {
+  return canvas
+    .locator("canvas.paint-layer--source")
+    .evaluate((element) => {
+      const source = element as HTMLCanvasElement;
+      const context = source.getContext("2d", { willReadFrequently: true });
+      if (!context) throw new Error("2D canvas context is unavailable");
+      const pixels = context.getImageData(
+        0,
+        0,
+        source.width,
+        source.height,
+      ).data;
+      let hash = 2166136261;
+      let alpha = 0;
+      for (let offset = 0; offset < pixels.length; offset += 1) {
+        hash ^= pixels[offset];
+        hash = Math.imul(hash, 16777619);
+        if (offset % 4 === 3) alpha += pixels[offset];
+      }
+      return {
+        hash: hash >>> 0,
+        alpha,
       };
     });
 }
@@ -326,7 +705,9 @@ test.describe("スマホ実タッチの回帰", () => {
     page,
   }) => {
     const canvas = page.getByTestId("mix-canvas");
-    const target = { x: 0.34, y: 0.47 };
+    // Keep the probe clear of the in-canvas size controls. On the shortest
+    // iPhone viewport those controls cover much of the upper-left quadrant.
+    const target = { x: 0.72, y: 0.47 };
 
     await touchElement(page, page.getByTestId("material-red"));
     const touchStart = await touchCanvasWithJitter(
@@ -351,6 +732,258 @@ test.describe("スマホ実タッチの回帰", () => {
           : Number.POSITIVE_INFINITY;
       })
       .toBeLessThanOrEqual(2);
+    const bounds = await sourcePaintBounds(canvas);
+    expect(bounds).toBeDefined();
+    expect(
+      Math.abs((bounds?.width ?? 0) - (bounds?.height ?? 0)),
+      JSON.stringify(bounds),
+    ).toBeLessThanOrEqual(4);
+  });
+
+  test("上部をタップしてもUIに隠れず、表示された絵の具の中心と一致する", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "android-chromium");
+    const canvas = page.getByTestId("mix-canvas");
+    const box = await canvas.boundingBox();
+    if (!box) throw new Error("Canvas is unavailable");
+    const target = {
+      x: box.x + box.width * 0.5,
+      y: box.y + box.height * 0.3,
+    };
+
+    await touchElement(page, page.getByTestId("material-black"));
+    await page.touchscreen.tap(target.x, target.y);
+    await expect(canvas.locator(".canvas-gesture-hint")).toHaveCount(0);
+
+    const sourceCentroid = await sourcePaintCentroid(canvas);
+    const visibleCentroid = await visibleDarkPaintCentroid(page, canvas);
+    expect(sourceCentroid).toBeDefined();
+    expect(
+      Math.hypot(
+        (sourceCentroid?.x ?? 0) - target.x,
+        (sourceCentroid?.y ?? 0) - target.y,
+      ),
+    ).toBeLessThanOrEqual(1);
+    expect(
+      Math.hypot(
+        visibleCentroid.x - target.x,
+        visibleCentroid.y - target.y,
+      ),
+    ).toBeLessThanOrEqual(1.5);
+  });
+
+  test("Android実タッチの長押しは一操作で中心から濃く重なる", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "android-chromium");
+    const canvas = page.getByTestId("mix-canvas");
+
+    await touchElement(page, page.getByTestId("material-black"));
+    await touchCanvasAt(page, canvas, 0.31, 0.55);
+    await holdCanvasAt(page, canvas, 0.69, 0.55, 900);
+
+    await expect(page.getByTestId("recipe-black")).toHaveText("5");
+    await expect
+      .poll(async () => {
+        const tapAlpha = await sourceAlphaAtRatio(canvas, 0.31, 0.55);
+        const holdAlpha = await sourceAlphaAtRatio(canvas, 0.69, 0.55);
+        return holdAlpha - tapAlpha;
+      })
+      .toBeGreaterThan(10);
+
+    await page.getByRole("button", { name: "元に戻す" }).first().click();
+    await expect(page.getByTestId("recipe-black")).toHaveText("1");
+  });
+
+  test("長押しして伸ばした軌跡は、現在のレシピ色ではなく選択色になる", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "android-chromium");
+    const canvas = page.getByTestId("mix-canvas");
+
+    await touchElement(page, page.getByTestId("material-red"));
+    await touchCanvasAt(page, canvas, 0.28, 0.55);
+    await expect(page.getByTestId("recipe-red")).toHaveText("1");
+
+    await touchElement(page, page.getByTestId("material-blue"));
+    const canvasBox = await canvas.boundingBox();
+    if (!canvasBox) throw new Error("Canvas is unavailable");
+    const endXRatio = 0.72 + 12 / canvasBox.width;
+    await withCanvasTouchAfterHoldMove(
+      page,
+      canvas,
+      0.72,
+      0.55,
+      430,
+      { x: 12, y: 0 },
+      async () => {
+        await expect
+          .poll(async () => {
+            const pixel = await sourcePixelAtRatio(
+              canvas,
+              endXRatio,
+              0.55,
+            );
+            return pixel[3];
+          })
+          .toBeGreaterThan(8);
+      },
+    );
+
+    await expect(page.getByTestId("recipe-red")).toHaveText("1");
+    await expect(page.getByTestId("recipe-blue")).toHaveText("3");
+    const endPixel = await sourcePixelAtRatio(canvas, endXRatio, 0.55);
+    expect(endPixel.slice(0, 3)).toEqual([0, 161, 233]);
+
+    // The selected blue stretch is a single action even though it has an
+    // origin load and an extended path.
+    await page.getByRole("button", { name: "元に戻す" }).first().click();
+    await expect(page.getByTestId("recipe-red")).toHaveText("1");
+    await expect(page.getByTestId("recipe-blue")).toHaveCount(0);
+  });
+
+  test("長押し前のドラッグでは、置いた絵の具を混ぜず履歴も増やさない", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "android-chromium");
+    const canvas = page.getByTestId("mix-canvas");
+
+    await touchElement(page, page.getByTestId("material-red"));
+    await touchCanvasAt(page, canvas, 0.3, 0.55);
+    await touchElement(page, page.getByTestId("material-blue"));
+    await touchCanvasAt(page, canvas, 0.7, 0.55);
+    await expect(page.getByTestId("recipe-red")).toHaveText("1");
+    await expect(page.getByTestId("recipe-blue")).toHaveText("1");
+    await expect
+      .poll(async () => (await sourcePaintDigest(canvas)).alpha)
+      .toBeGreaterThan(0);
+    await page.waitForTimeout(100);
+    const beforeDrag = await sourcePaintDigest(canvas);
+
+    await touchCanvasWithJitter(page, canvas, 0.26, 0.55, {
+      x: 180,
+      y: 0,
+    });
+    await page.waitForTimeout(250);
+
+    expect(await sourcePaintDigest(canvas)).toEqual(beforeDrag);
+    await expect(page.getByTestId("recipe-red")).toHaveText("1");
+    await expect(page.getByTestId("recipe-blue")).toHaveText("1");
+
+    // A no-op drag must not consume an Undo level. One Undo therefore removes
+    // the preceding blue tap immediately, rather than merely undoing a mix.
+    await page.getByRole("button", { name: "元に戻す" }).first().click();
+    await expect(page.getByTestId("recipe-red")).toHaveText("1");
+    await expect(page.getByTestId("recipe-blue")).toHaveCount(0);
+  });
+
+  test("保存レシピ色を長押しして伸ばすと、経路を連続して塗り配合比とUndoを保つ", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "android-chromium");
+    const canvas = page.getByTestId("mix-canvas");
+
+    await touchElement(page, page.getByTestId("material-red"));
+    await touchCanvasAt(page, canvas, 0.4, 0.55);
+    await touchElement(page, page.getByTestId("material-blue"));
+    await touchCanvasAt(page, canvas, 0.54, 0.55);
+    await touchCanvasAt(page, canvas, 0.66, 0.55);
+    await page.getByTestId("open-save-color").click();
+    const dialog = page.getByRole("dialog", { name: "この色を登録" });
+    await dialog.getByLabel("色の名前").fill("赤1青2の伸ばす色");
+    await dialog.getByTestId("confirm-save-color").click();
+
+    await page.getByRole("button", { name: "まっさらに" }).click();
+    await touchElement(page, page.getByTestId("recipe-material-0"));
+    await expect(page.getByTestId("recipe-material-0")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    await holdAndDragCanvas(page, canvas, 0.24, 0.55, 430, [
+      { x: 38, y: 0 },
+      { x: 76, y: 0 },
+      { x: 114, y: 0 },
+      { x: 152, y: 0 },
+      { x: 188, y: 0 },
+    ]);
+
+    await expect
+      .poll(async () => {
+        const alphas = await Promise.all([
+          sourceAlphaAtRatio(canvas, 0.24, 0.55),
+          sourceAlphaAtRatio(canvas, 0.5, 0.55),
+          sourceAlphaAtRatio(canvas, 0.72, 0.55),
+        ]);
+        return Math.min(...alphas);
+      })
+      .toBeGreaterThan(8);
+
+    const redUnits = Number(
+      await page.getByTestId("recipe-red").textContent(),
+    );
+    const blueUnits = Number(
+      await page.getByTestId("recipe-blue").textContent(),
+    );
+    expect(redUnits).toBeGreaterThan(0);
+    expect(blueUnits).toBe(redUnits * 2);
+
+    // The entire stretched path is one gesture from pointer-down to pointer-up.
+    await page.getByRole("button", { name: "元に戻す" }).first().click();
+    await expect(page.getByTestId("recipe-summary")).toHaveCount(0);
+    await expect.poll(() => sourceCanvasHasPaint(canvas)).toBe(false);
+  });
+
+  test("長押し中に色を切り替えても別の色として確定しない", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "android-chromium");
+    const canvas = page.getByTestId("mix-canvas");
+
+    await touchElement(page, page.getByTestId("material-black"));
+    await withCanvasTouch(page, canvas, 0.5, 0.55, async () => {
+      await page.waitForTimeout(430);
+      await page.getByTestId("material-blue").click();
+    });
+
+    await expect(
+      page.getByRole("heading", { name: "まだ色がありません" }),
+    ).toBeVisible();
+    await expect(page.getByTestId("recipe-black")).toHaveCount(0);
+    await expect(page.getByTestId("recipe-blue")).toHaveCount(0);
+  });
+
+  test("水の長押し予告と確定形は波打たず同じ真円になる", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "android-chromium");
+    const canvas = page.getByTestId("mix-canvas");
+
+    await touchElement(page, page.getByTestId("material-water"));
+    await withCanvasTouch(page, canvas, 0.5, 0.55, async () => {
+      await page.waitForTimeout(430);
+      const preview = page.getByTestId("paint-hold-preview");
+      await expect(preview).toBeVisible();
+      const geometry = await preview.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return {
+          width: rect.width,
+          height: rect.height,
+          clipPath: getComputedStyle(element).clipPath,
+        };
+      });
+      expect(Math.abs(geometry.width - geometry.height)).toBeLessThanOrEqual(1);
+      expect(geometry.clipPath).toContain("circle");
+    });
+
+    await expect(page.getByTestId("recipe-water")).toHaveText("2");
+    const bounds = await sourcePaintBounds(canvas);
+    expect(bounds).toBeDefined();
+    expect(
+      Math.abs((bounds?.width ?? 0) - (bounds?.height ?? 0)),
+      JSON.stringify(bounds),
+    ).toBeLessThanOrEqual(4);
   });
 
   test("おえかきとぬりえで保存色を実タッチ選択してすぐ使える", async ({

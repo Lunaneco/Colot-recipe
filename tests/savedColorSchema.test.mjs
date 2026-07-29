@@ -4,6 +4,7 @@ import test from "node:test";
 import { mixPaint } from "../lib/colorScience.ts";
 import {
   MAX_RECIPE_UNITS_PER_MATERIAL,
+  SAVED_COLOR_SCHEMA_VERSION,
   SavedColorImportError,
   containsSavedColorId,
   hasSameSavedColorId,
@@ -44,6 +45,7 @@ test("旧形式の欠落項目を補い、mixedと顔料比率を配合から再
     red: 0.5,
     blue: 0,
     yellow: 0.3333,
+    black: 0,
     white: 0.1667,
   });
   assert.deepEqual(color.steps, []);
@@ -102,18 +104,34 @@ test("版付き形式を読み、壊れた項目だけを理由付きで除外�
   assert.match(result.issues[0].message, /日時/);
 });
 
-test("版2はcompound stepの元レシピを安全にJSON往復する", () => {
-  const stepRecipe = { red: 2, blue: 1, yellow: 3, white: 4, water: 5 };
+test("版3は黒と長押しを含むcompound stepを安全にJSON往復する", () => {
+  const stepRecipe = {
+    red: 2,
+    blue: 1,
+    yellow: 3,
+    black: 2,
+    white: 4,
+    water: 5,
+  };
   const payload = {
-    version: 2,
+    version: SAVED_COLOR_SCHEMA_VERSION,
     colors: [
       legacyColor({
         id: "compound-recipe",
+        recipe: Object.fromEntries(
+          Object.entries(stepRecipe).map(([material, units]) => [
+            material,
+            units * 4,
+          ]),
+        ),
         steps: [
           {
             id: "compound-step",
             material: "yellow",
             recipe: stepRecipe,
+            deposit: 4,
+            shape: "hold",
+            waveSeed: 0.375,
             size: "large",
             x: 0.25,
             y: 0.75,
@@ -126,15 +144,127 @@ test("版2はcompound stepの元レシピを安全にJSON往復する", () => {
 
   const first = parseSavedColorsJson(payload, { now: NOW });
   const second = parseSavedColorsJson(
-    JSON.stringify({ version: 2, colors: first.colors }),
+    JSON.stringify({
+      version: SAVED_COLOR_SCHEMA_VERSION,
+      colors: first.colors,
+    }),
     { now: NOW },
   );
 
-  assert.equal(first.version, 2);
+  assert.equal(first.version, SAVED_COLOR_SCHEMA_VERSION);
   assert.equal(first.rejected, 0);
   assert.deepEqual(first.colors[0].steps[0].recipe, stepRecipe);
   assert.deepEqual(second.colors[0].steps, first.colors[0].steps);
   assert.deepEqual(second.colors[0].steps[0].recipe, stepRecipe);
+  assert.deepEqual(
+    {
+      deposit: second.colors[0].steps[0].deposit,
+      shape: second.colors[0].steps[0].shape,
+      waveSeed: second.colors[0].steps[0].waveSeed,
+    },
+    { deposit: 4, shape: "hold", waveSeed: 0.375 },
+  );
+});
+
+test("旧版2のレシピは黒0として安全に移行する", () => {
+  const result = parseSavedColorsJson(
+    { version: 2, colors: [legacyColor()] },
+    { now: NOW },
+  );
+
+  assert.equal(result.version, 2);
+  assert.equal(result.colors[0].recipe.black, 0);
+});
+
+test("長押し手順の不正な量・形・波形を色単位で拒否する", () => {
+  const holdStep = (overrides = {}) => ({
+    id: "held-step",
+    material: "black",
+    size: "medium",
+    x: 0.5,
+    y: 0.5,
+    createdAt: NOW,
+    deposit: 3,
+    shape: "hold",
+    waveSeed: 0.5,
+    ...overrides,
+  });
+  const result = parseSavedColorsJson(
+    {
+      version: SAVED_COLOR_SCHEMA_VERSION,
+      colors: [
+        legacyColor({ id: "deposit-zero", steps: [holdStep({ deposit: 0 })] }),
+        legacyColor({
+          id: "deposit-fraction",
+          steps: [holdStep({ deposit: 1.5 })],
+        }),
+        legacyColor({ id: "deposit-huge", steps: [holdStep({ deposit: 9 })] }),
+        legacyColor({ id: "shape-unknown", steps: [holdStep({ shape: "blob" })] }),
+        legacyColor({ id: "wave-negative", steps: [holdStep({ waveSeed: -0.1 })] }),
+        legacyColor({ id: "wave-large", steps: [holdStep({ waveSeed: 1.1 })] }),
+        legacyColor({
+          id: "valid-hold",
+          recipe: { black: 3 },
+          steps: [holdStep()],
+        }),
+      ],
+    },
+    { now: NOW },
+  );
+
+  assert.deepEqual(
+    result.colors.map((color) => color.id),
+    ["valid-hold"],
+  );
+  assert.equal(result.rejected, 6);
+});
+
+test("手順の実重なり量が正本レシピや保存上限を迂回する色を拒否する", () => {
+  const compoundStep = (recipe, deposit) => ({
+    id: "compound-step",
+    material: "blue",
+    recipe,
+    deposit,
+    shape: "hold",
+    waveSeed: 0.5,
+    size: "medium",
+    x: 0.5,
+    y: 0.5,
+    createdAt: NOW,
+  });
+  const result = parseSavedColorsJson(
+    {
+      version: SAVED_COLOR_SCHEMA_VERSION,
+      colors: [
+        legacyColor({
+          id: "forged-local-load",
+          recipe: { red: 1 },
+          steps: [compoundStep({ blue: 1_000 }, 8)],
+        }),
+        legacyColor({
+          id: "mismatched-total",
+          recipe: { blue: 1 },
+          steps: [compoundStep({ blue: 1 }, 2)],
+        }),
+        legacyColor({
+          id: "valid-limit",
+          recipe: { blue: 1_000 },
+          steps: [compoundStep({ blue: 125 }, 8)],
+        }),
+      ],
+    },
+    { now: NOW },
+  );
+
+  assert.deepEqual(
+    result.colors.map((color) => color.id),
+    ["valid-limit"],
+  );
+  assert.equal(result.rejected, 2);
+  assert.ok(
+    result.issues.every((issue) => /手順合計/.test(issue.message)),
+    result.issues,
+  );
 });
 
 test("版2はcompound step内の不正なレシピ単位を色ごと拒否する", () => {

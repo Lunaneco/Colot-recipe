@@ -13,7 +13,7 @@ import {
   type PigmentId,
   type RecipeUnits,
 } from "./types";
-import { paintStepUnits } from "./paintSteps";
+import { paintStepDeposit, paintStepUnits } from "./paintSteps";
 
 export type SpatialMixState = {
   recipe: RecipeUnits;
@@ -78,16 +78,70 @@ function dabRadii(
   radiusScale = 1,
   role: "pigment" | "water" = "pigment",
 ) {
-  const radius = SIZE_RADIUS[step.size];
+  const holdSpread =
+    role === "pigment" && step.shape === "hold"
+      ? clamp(
+          1.16 + Math.max(0, paintStepDeposit(step) - 2) * 0.024,
+          1.16,
+          1.3,
+        )
+      : 1;
+  const radius = SIZE_RADIUS[step.size] * holdSpread;
   const horizontalScale = role === "water" ? 1.42 : 1;
-  const verticalScale = role === "water" ? 1.08 : 0.82;
+  const verticalScale = role === "water" ? 1.42 : 1;
   return {
     x: (radius * horizontalScale * radiusScale) / viewport.width,
     y: (radius * verticalScale * radiusScale) / viewport.height,
   };
 }
 
-function dabContribution(
+function stableWaveSeed(step: PaintStep) {
+  if (step.waveSeed !== undefined) return clamp(step.waveSeed);
+  let hash = 2166136261;
+  for (let index = 0; index < step.id.length; index += 1) {
+    hash ^= step.id.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) / 4294967295;
+}
+
+function paintWaveAmplitude(step: PaintStep) {
+  if (step.shape === "stroke") return 0.038;
+  if (step.shape !== "hold") return 0;
+  return clamp(
+    0.028 + Math.max(0, paintStepDeposit(step) - 2) * 0.008,
+    0.028,
+    0.085,
+  );
+}
+
+function paintWaveScale(step: PaintStep, angle: number) {
+  const amplitude = paintWaveAmplitude(step);
+  if (amplitude === 0) return 1;
+  const phase = stableWaveSeed(step) * Math.PI * 2;
+  return (
+    1 +
+    amplitude *
+      (0.68 * Math.sin(angle * 6 + phase) +
+        0.32 * Math.sin(angle * 11 - phase * 0.73))
+  );
+}
+
+function dabSupportRadii(
+  step: PaintStep,
+  viewport: SpatialSampleViewport,
+  radiusScale = 1,
+  role: "pigment" | "water" = "pigment",
+) {
+  const radii = dabRadii(step, viewport, radiusScale, role);
+  const waveSupport = role === "pigment" ? 1 + paintWaveAmplitude(step) : 1;
+  return {
+    x: radii.x * waveSupport,
+    y: radii.y * waveSupport,
+  };
+}
+
+export function paintDabContribution(
   step: PaintStep,
   x: number,
   y: number,
@@ -98,11 +152,16 @@ function dabContribution(
   const radii = dabRadii(step, viewport, radiusScale, role);
   const dx = (x - step.x) / radii.x;
   const dy = (y - step.y) / radii.y;
-  const squaredDistance = dx * dx + dy * dy;
+  const radialDistance = Math.hypot(dx, dy);
+  const waveScale =
+    role === "pigment" ? paintWaveScale(step, Math.atan2(dy, dx)) : 1;
+  const squaredDistance = (radialDistance / waveScale) ** 2;
   if (squaredDistance >= 1) return 0;
 
-  // A smooth compact kernel keeps each placement equal to one unit at the
-  // centre while allowing physically plausible, gradual overlap at the edge.
+  // A smooth compact kernel keeps a tap exactly circular in physical pixels.
+  // Held paint uses the same centre-weighted mass with a small deterministic
+  // edge wave; its deposited units therefore remain available to the
+  // eyedropper instead of being a display-only darkening effect.
   return (1 - squaredDistance) ** 1.55;
 }
 
@@ -225,13 +284,12 @@ function colourRecipeFromWeights(
   const quantize = (value: number) =>
     Math.round(value * COLOUR_RATIO_SUBDIVISIONS) /
     COLOUR_RATIO_SUBDIVISIONS;
-  return {
-    red: quantize(weights.red * scale),
-    blue: quantize(weights.blue * scale),
-    yellow: quantize(weights.yellow * scale),
-    white: quantize(weights.white * scale),
-    water: quantize(weights.water * scale),
-  };
+  return Object.fromEntries(
+    MATERIAL_IDS.map((material) => [
+      material,
+      quantize(weights[material] * scale),
+    ]),
+  ) as Required<RecipeUnits>;
 }
 
 function compactRecipeFromWeights(
@@ -370,7 +428,7 @@ function sampleSpatialPaintFromSteps(
   for (const step of steps) {
     const waterUnits = paintStepUnits(step, "water");
     if (waterUnits <= 0) continue;
-    weights.water += waterUnits * dabContribution(
+    weights.water += waterUnits * paintDabContribution(
       step,
       point.x,
       point.y,
@@ -402,7 +460,7 @@ function sampleSpatialPaintFromSteps(
       (pigment) => paintStepUnits(step, pigment) > 0,
     );
     if (!hasPigment) continue;
-    const contribution = dabContribution(
+    const contribution = paintDabContribution(
       step,
       point.x,
       point.y,
@@ -463,7 +521,7 @@ function sampleSpatialPaintFromSteps(
     recipe,
     pigmentRatio,
     waterRatio,
-    coverage: clamp(1 - Math.exp(-pigmentWeight * 3.2)),
+    coverage: clamp(1 - Math.exp(-2.2 * pigmentWeight ** 0.82)),
     mixed,
   };
 }
@@ -497,10 +555,10 @@ export function createSpatialPaintSampler(
     );
     const hasWater = paintStepUnits(step, "water") > 0;
     const pigmentRadii = hasPigment
-      ? dabRadii(step, viewport, 1.32, "pigment")
+      ? dabSupportRadii(step, viewport, 1.32, "pigment")
       : { x: 0, y: 0 };
     const waterRadii = hasWater
-      ? dabRadii(step, viewport, 1, "water")
+      ? dabSupportRadii(step, viewport, 1, "water")
       : { x: 0, y: 0 };
     const radii = {
       x: Math.max(pigmentRadii.x, waterRadii.x),

@@ -31,6 +31,7 @@ import type {
   MixerTool,
   PaintSize,
   PaintStep,
+  PaintShape,
   RecipeUnits,
   SavedColor,
 } from "../lib/types";
@@ -70,20 +71,35 @@ type MixingStudioProps = {
   onSelectMaterial: (material: MixerTool) => void;
   onSelectRecipeColor: (color: SavedColor) => void;
   onSizeChange: (size: PaintSize) => void;
-  onAdd: (material: MaterialId, size: PaintSize, x: number, y: number) => void;
-  onAddStroke: (
+  onAdd: (
+    material: MaterialId,
+    size: PaintSize,
+    x: number,
+    y: number,
+    placement?: PaintPlacement,
+  ) => void;
+  onStretchMaterial: (
     material: MaterialId,
     size: PaintSize,
     points: Array<{ x: number; y: number }>,
+    originDeposit: number,
+    waveSeed: number,
   ) => boolean;
   onAddRecipe: (
     color: SavedColor,
     size: PaintSize,
     x: number,
     y: number,
+    placement?: PaintPlacement,
   ) => void;
+  onStretchRecipe: (
+    color: SavedColor,
+    size: PaintSize,
+    points: Array<{ x: number; y: number }>,
+    originDeposit: number,
+    waveSeed: number,
+  ) => boolean;
   onErase: (x: number, y: number) => void;
-  onMix: (gesture: Omit<MixGesture, "id" | "createdAt">) => void;
   onMixAll: () => void;
   onClear: () => void;
   onUndo: () => void;
@@ -95,12 +111,79 @@ type MixingStudioProps = {
 
 const CANVAS_WIDTH = 1100;
 const DEFAULT_CANVAS_HEIGHT = 760;
+const HOLD_THRESHOLD_MS = 320;
+const HOLD_UNIT_INTERVAL_MS = 260;
+const HOLD_MAX_DEPOSIT = 8;
+
+type PaintPlacement = {
+  deposit?: number;
+  shape?: PaintShape;
+  waveSeed?: number;
+};
+
+type HoldPreview = {
+  x: number;
+  y: number;
+  deposit: number;
+  color: string;
+  seed: number;
+  role: "pigment" | "water";
+};
+
+type ActivePointerSelection = {
+  material: MixerTool;
+  recipeColorId?: string;
+  size: PaintSize;
+  previewColor?: string;
+  water: boolean;
+  eraser: boolean;
+};
 
 const sizeRadius: Record<PaintSize, number> = {
   small: 48,
   medium: 76,
   large: 108,
 };
+
+function holdDepositForDuration(durationMs: number) {
+  if (durationMs < HOLD_THRESHOLD_MS) return 1;
+  return Math.min(
+    HOLD_MAX_DEPOSIT,
+    2 +
+      Math.floor(
+        Math.max(0, durationMs - HOLD_THRESHOLD_MS) /
+          HOLD_UNIT_INTERVAL_MS,
+      ),
+  );
+}
+
+function holdWaveAmplitude(deposit: number) {
+  if (deposit <= 1) return 0;
+  return Math.min(0.085, 0.028 + Math.max(0, deposit - 2) * 0.008);
+}
+
+function holdSpread(deposit: number) {
+  if (deposit <= 1) return 1;
+  return Math.min(1.3, 1.16 + Math.max(0, deposit - 2) * 0.024);
+}
+
+function holdClipPath(seed: number, deposit: number) {
+  if (deposit <= 1) return "circle(50% at 50% 50%)";
+  const amplitude = holdWaveAmplitude(deposit);
+  const phase = seed * Math.PI * 2;
+  const support = 1 + amplitude;
+  const points = Array.from({ length: 36 }, (_, index) => {
+    const angle = (index / 36) * Math.PI * 2;
+    const wave =
+      1 +
+      amplitude *
+        (0.68 * Math.sin(angle * 6 + phase) +
+          0.32 * Math.sin(angle * 11 - phase * 0.73));
+    const radius = (50 / support) * wave;
+    return `${50 + Math.cos(angle) * radius}% ${50 + Math.sin(angle) * radius}%`;
+  });
+  return `polygon(${points.join(",")})`;
+}
 
 function resamplePath(
   path: Array<{ x: number; y: number }>,
@@ -212,7 +295,7 @@ function drawPaintDab(
     gradient.addColorStop(1, "rgba(74,147,160,0)");
     context.fillStyle = gradient;
     context.beginPath();
-    context.ellipse(x, y, radius * 1.42, radius * 1.08, -0.14, 0, Math.PI * 2);
+    context.ellipse(x, y, radius * 1.42, radius * 1.42, 0, 0, Math.PI * 2);
     context.fill();
     context.beginPath();
     context.ellipse(
@@ -353,7 +436,9 @@ function drawSpatialMixField(
         Math.max(
           0,
           (sampledPixel.coverage * (1 - dryBody) +
-            bodyCoverage * dryBody) *
+            bodyCoverage *
+              (0.52 + 0.48 * sampledPixel.coverage) *
+              dryBody) *
             grain,
         ),
       );
@@ -391,10 +476,10 @@ export function MixingStudio({
   onSelectRecipeColor,
   onSizeChange,
   onAdd,
-  onAddStroke,
+  onStretchMaterial,
   onAddRecipe,
+  onStretchRecipe,
   onErase,
-  onMix,
   onMixAll,
   onClear,
   onUndo,
@@ -418,12 +503,22 @@ export function MixingStudio({
     undefined,
   );
   const sampleFrameRef = useRef<number | undefined>(undefined);
-  const dragging = useRef(false);
+  const holdFrameRef = useRef<number | undefined>(undefined);
+  const holdStartedAtRef = useRef<number | undefined>(undefined);
+  const holdDepositRef = useRef(1);
+  const holdSeedRef = useRef(0);
+  const stretching = useRef(false);
+  const gestureCancelled = useRef(false);
+  const stretchOriginDepositRef = useRef(1);
   const activePointerId = useRef<number | undefined>(undefined);
+  const activePointerSelection = useRef<
+    ActivePointerSelection | undefined
+  >(undefined);
   const [webglReady, setWebglReady] = useState(false);
   const [canvasHeight, setCanvasHeight] = useState(DEFAULT_CANVAS_HEIGHT);
   const [samplePoint, setSamplePoint] = useState<{ x: number; y: number }>();
   const [sampledPaint, setSampledPaint] = useState<SpatialPaintSample>();
+  const [holdPreview, setHoldPreview] = useState<HoldPreview>();
   const isPicker = !selectedRecipeColor && selectedMaterial === "picker";
   const isWater = !selectedRecipeColor && selectedMaterial === "water";
   const isEraser = !selectedRecipeColor && selectedMaterial === "eraser";
@@ -637,6 +732,9 @@ export function MixingStudio({
       if (sampleFrameRef.current) {
         window.cancelAnimationFrame(sampleFrameRef.current);
       }
+      if (holdFrameRef.current) {
+        window.cancelAnimationFrame(holdFrameRef.current);
+      }
     },
     [],
   );
@@ -793,48 +891,163 @@ export function MixingStudio({
     };
   };
 
-  const previewStroke = (path: Array<{ x: number; y: number; time: number }>) => {
+  const previewStretch = (
+    path: Array<{ x: number; y: number; time: number }>,
+  ) => {
     if (path.length < 2 || !paintCanvas.current) return;
     const context = paintCanvas.current.getContext("2d");
     if (!context) return;
     const current = path[path.length - 1];
     const previous = path[path.length - 2];
-    const elapsed = Math.max(1, current.time - previous.time);
-    const distance = Math.hypot(
-      (current.x - previous.x) * CANVAS_WIDTH,
-      (current.y - previous.y) * canvasHeight,
-    );
-    const speed = distance / elapsed;
+    const startedSelection = activePointerSelection.current;
+    const selectedColor = startedSelection?.previewColor;
+    if (!selectedColor) return;
+    const radius = sizeRadius[size];
+    const startX = previous.x * CANVAS_WIDTH;
+    const startY = previous.y * canvasHeight;
+    const endX = current.x * CANVAS_WIDTH;
+    const endY = current.y * canvasHeight;
     context.save();
     context.lineCap = "round";
-    if (isWater) {
+    context.lineJoin = "round";
+    if (startedSelection.water) {
       context.globalCompositeOperation = "screen";
       context.strokeStyle = "rgba(106, 176, 190, 0.24)";
+      context.lineWidth = radius * 2 * 1.42;
     } else {
-      const previewColor =
-        pigmentUnits === 0 && isMaterialTool(selectedMaterial)
-          ? MATERIAL_COLORS[selectedMaterial]
-          : mixed.hex;
-      context.strokeStyle = hexToRgba(previewColor, 0.24);
+      // This is a placement preview, not a mix preview. Keep the selected
+      // paint visually dominant even when the path crosses an existing mix.
+      context.globalCompositeOperation = "source-over";
+      context.strokeStyle = hexToRgba(selectedColor, 0.88);
+      context.lineWidth = radius * 1.9;
+      context.beginPath();
+      context.moveTo(startX, startY);
+      context.lineTo(endX, endY);
+      context.stroke();
+      context.strokeStyle = hexToRgba(selectedColor, 0.98);
+      context.lineWidth = radius * 1.12;
     }
-    context.lineWidth = Math.max(34, Math.min(130, 44 + speed * 70));
     context.beginPath();
-    context.moveTo(previous.x * CANVAS_WIDTH, previous.y * canvasHeight);
-    context.lineTo(current.x * CANVAS_WIDTH, current.y * canvasHeight);
+    context.moveTo(startX, startY);
+    context.lineTo(endX, endY);
     context.stroke();
+
+    if (!startedSelection.water) {
+      const phase =
+        hashNoise(
+          current.x * 1_913 +
+            current.y * 2_539 +
+            path.length * 0.618,
+        ) *
+        Math.PI *
+        2;
+      context.fillStyle = hexToRgba(selectedColor, 0.9);
+      context.beginPath();
+      for (let index = 0; index <= 28; index += 1) {
+        const angle = (index / 28) * Math.PI * 2;
+        const wave =
+          0.92 +
+          Math.sin(angle * 6 + phase) * 0.055 +
+          Math.sin(angle * 11 - phase * 0.7) * 0.025;
+        const x = endX + Math.cos(angle) * radius * wave;
+        const y = endY + Math.sin(angle) * radius * wave;
+        if (index === 0) context.moveTo(x, y);
+        else context.lineTo(x, y);
+      }
+      context.closePath();
+      context.fill();
+    }
     context.restore();
     updateTexture();
   };
 
+  const stopHoldPreview = () => {
+    if (holdFrameRef.current) {
+      window.cancelAnimationFrame(holdFrameRef.current);
+      holdFrameRef.current = undefined;
+    }
+    holdStartedAtRef.current = undefined;
+    holdDepositRef.current = 1;
+    setHoldPreview(undefined);
+  };
+
+  const startHoldPreview = (point: { x: number; y: number }) => {
+    const startedSelection = activePointerSelection.current;
+    if (isPicker || startedSelection?.eraser) return;
+    const role = startedSelection?.water ? "water" : "pigment";
+    const color = startedSelection?.previewColor;
+    if (!color) return;
+    const startedAt = performance.now();
+    const seed = hashNoise(
+      point.x * 997 + point.y * 619 + startedAt * 0.001,
+    );
+    holdStartedAtRef.current = startedAt;
+    holdDepositRef.current = 1;
+    holdSeedRef.current = seed;
+    setHoldPreview({
+      x: point.x,
+      y: point.y,
+      deposit: 1,
+      color,
+      seed,
+      role,
+    });
+
+    const update = () => {
+      if (
+        activePointerId.current === undefined ||
+        stretching.current ||
+        holdStartedAtRef.current === undefined
+      ) {
+        holdFrameRef.current = undefined;
+        return;
+      }
+      const deposit = holdDepositForDuration(
+        performance.now() - holdStartedAtRef.current,
+      );
+      if (deposit !== holdDepositRef.current) {
+        holdDepositRef.current = deposit;
+        setHoldPreview({
+          x: point.x,
+          y: point.y,
+          deposit,
+          color,
+          seed,
+          role,
+        });
+      }
+      holdFrameRef.current = window.requestAnimationFrame(update);
+    };
+    holdFrameRef.current = window.requestAnimationFrame(update);
+  };
+
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if ((event.target as HTMLElement).closest("button")) return;
+    if (activePointerId.current !== undefined) return;
     activePointerId.current = event.pointerId;
+    activePointerSelection.current = {
+      material: selectedMaterial,
+      recipeColorId: selectedRecipeColor?.id,
+      size,
+      previewColor: selectedRecipeColor
+        ? (selectedRecipeColor.capturedAppearance?.hex ??
+          selectedRecipeColor.mixed.hex)
+        : isMaterialTool(selectedMaterial)
+          ? MATERIAL_COLORS[selectedMaterial]
+          : undefined,
+      water: isWater,
+      eraser: isEraser,
+    };
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = toNormalizedPoint(event);
     pointerPath.current = [point];
-    dragging.current = false;
+    stretching.current = false;
+    gestureCancelled.current = false;
+    stretchOriginDepositRef.current = 1;
     if (isPicker) {
       captureSampleAt({ x: point.x, y: point.y });
+    } else {
+      startHoldPreview(point);
     }
   };
 
@@ -846,22 +1059,50 @@ export function MixingStudio({
       scheduleSampleAt({ x: point.x, y: point.y });
       return;
     }
-    const previous = pointerPath.current[pointerPath.current.length - 1];
-    const distance = previous
-      ? Math.hypot(point.x - previous.x, point.y - previous.y)
-      : 0;
-    const dragThreshold = event.pointerType === "touch" ? 0.012 : 0.004;
-    if (distance < dragThreshold) return;
-    pointerPath.current.push(point);
-    if (pointerPath.current.length > 1) {
-      dragging.current = true;
-      if (
-        !selectedRecipeColor &&
-        (isWater || pigmentUnits > 0 || isMaterialTool(selectedMaterial))
-      ) {
-        previewStroke(pointerPath.current);
-      }
+    if (gestureCancelled.current) {
+      return;
     }
+    const origin = pointerPath.current[0];
+    const surfaceRect =
+      paintCanvas.current?.getBoundingClientRect() ??
+      event.currentTarget.getBoundingClientRect();
+    const distancePixels = origin
+      ? Math.hypot(
+          (point.x - origin.x) * surfaceRect.width,
+          (point.y - origin.y) * surfaceRect.height,
+        )
+      : 0;
+    const dragThreshold = event.pointerType === "touch" ? 10 : 5;
+    if (distancePixels < dragThreshold) return;
+
+    if (!stretching.current) {
+      const deposit =
+        holdStartedAtRef.current === undefined
+          ? 1
+          : holdDepositForDuration(
+              performance.now() - holdStartedAtRef.current,
+            );
+      if (
+        deposit <= 1 ||
+        activePointerSelection.current?.eraser
+      ) {
+        // Moving before the hold threshold is neither a tap nor the removed
+        // "trace to mix" gesture. Cancel it without changing paint or history.
+        gestureCancelled.current = true;
+        stopHoldPreview();
+        redraw();
+        return;
+      }
+      stretchOriginDepositRef.current = deposit;
+      stretching.current = true;
+      stopHoldPreview();
+    }
+
+    pointerPath.current.push(point);
+    if (pointerPath.current.length > 320) {
+      pointerPath.current.splice(1, 1);
+    }
+    previewStretch(pointerPath.current);
   };
 
   const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -872,58 +1113,89 @@ export function MixingStudio({
     // exactly where the user touched.
     const tapPoint = pointerPath.current[0] ?? point;
     const path = [...pointerPath.current, point];
+    const holdDuration =
+      holdStartedAtRef.current === undefined
+        ? 0
+        : performance.now() - holdStartedAtRef.current;
+    const wasStretching = stretching.current;
+    const wasCancelled = gestureCancelled.current;
+    const deposit = wasStretching
+      ? stretchOriginDepositRef.current
+      : holdDepositForDuration(holdDuration);
+    const placement: PaintPlacement =
+      deposit > 1
+        ? {
+            deposit,
+            shape: "hold",
+            waveSeed: holdSeedRef.current,
+          }
+        : { shape: "tap" };
+    const startedSelection = activePointerSelection.current;
+    const selectionIsUnchanged =
+      startedSelection !== undefined &&
+      startedSelection.material === selectedMaterial &&
+      startedSelection.recipeColorId === selectedRecipeColor?.id &&
+      startedSelection.size === size;
+    activePointerId.current = undefined;
+    activePointerSelection.current = undefined;
+    stopHoldPreview();
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
 
-    if (isPicker) {
+    if (!selectionIsUnchanged || wasCancelled) {
+      redraw();
+    } else if (isPicker) {
       if (sampleFrameRef.current) {
         window.cancelAnimationFrame(sampleFrameRef.current);
         sampleFrameRef.current = undefined;
       }
       pendingSamplePoint.current = undefined;
       captureSampleAt({ x: point.x, y: point.y });
+    } else if (wasStretching) {
+      const stretchPoints = resamplePath(path, size, canvasHeight);
+      const added = selectedRecipeColor
+        ? onStretchRecipe(
+            selectedRecipeColor,
+            size,
+            stretchPoints,
+            deposit,
+            holdSeedRef.current,
+          )
+        : isMaterialTool(selectedMaterial)
+          ? onStretchMaterial(
+              selectedMaterial,
+              size,
+              stretchPoints,
+              deposit,
+              holdSeedRef.current,
+            )
+          : false;
+      if (!added) redraw();
     } else if (selectedRecipeColor) {
-      onAddRecipe(selectedRecipeColor, size, tapPoint.x, tapPoint.y);
-    } else if (!dragging.current) {
+      onAddRecipe(
+        selectedRecipeColor,
+        size,
+        tapPoint.x,
+        tapPoint.y,
+        placement,
+      );
+    } else {
       if (isEraser) onErase(tapPoint.x, tapPoint.y);
       else if (isMaterialTool(selectedMaterial)) {
-        onAdd(selectedMaterial, size, tapPoint.x, tapPoint.y);
-      }
-    } else if (isWater) {
-      const added = onAddStroke(
-        "water",
-        size,
-        resamplePath(path, size, canvasHeight),
-      );
-      if (!added) redraw();
-    } else if (pigmentUnits === 0 && isMaterialTool(selectedMaterial)) {
-      const added = onAddStroke(
-        selectedMaterial,
-        size,
-        resamplePath(path, size, canvasHeight),
-      );
-      if (!added) redraw();
-    } else if (pigmentUnits > 0) {
-      let distance = 0;
-      for (let index = 1; index < path.length; index += 1) {
-        distance += Math.hypot(
-          (path[index].x - path[index - 1].x) * CANVAS_WIDTH,
-          (path[index].y - path[index - 1].y) * canvasHeight,
+        onAdd(
+          selectedMaterial,
+          size,
+          tapPoint.x,
+          tapPoint.y,
+          placement,
         );
       }
-      const duration = Math.max(1, path[path.length - 1].time - path[0].time);
-      onMix({
-        kind: "gesture",
-        distance,
-        speed: distance / duration,
-        points: path.length,
-        path: path.map(({ x, y }) => ({ x, y })),
-      });
     }
     pointerPath.current = [];
-    dragging.current = false;
-    activePointerId.current = undefined;
+    stretching.current = false;
+    gestureCancelled.current = false;
+    stretchOriginDepositRef.current = 1;
   };
 
   return (
@@ -933,7 +1205,7 @@ export function MixingStudio({
           <div className="mixing-card__bar">
             <div>
               <p className="eyebrow">混色パレット</p>
-              <h2 id="mixing-heading">絵の具を置いて、なぞって混ぜる</h2>
+              <h2 id="mixing-heading">絵の具を置いて、長押しで伸ばす</h2>
             </div>
             <div className="canvas-status">
               <span className={webglReady ? "status-dot is-active" : "status-dot"} />
@@ -949,22 +1221,43 @@ export function MixingStudio({
               tabIndex={0}
               aria-label={
                 selectedRecipeColor
-                  ? `混色パレット。保存色「${selectedRecipeColor.name}」を置くにはタップします。元の配合を1バッチそのまま加えます。`
+                  ? `混色パレット。保存色「${selectedRecipeColor.name}」はタップで1バッチ、長押ししたまま動かすと元の配合のまま波状に伸ばせます。`
                   : isPicker
                     ? "混色パレット。調べたい場所をタップまたはなぞると、その地点の配合比率を表示します。矢印キーでも調べる場所を移動できます。"
                     : isWater
-                      ? "混色パレット。タップまたはなぞって、触れた場所だけを濡らします。"
-                      : "混色パレット。選択中の材料を置くにはタップ、混ぜるにはドラッグします。"
+                      ? "混色パレット。タップで真円に濡らし、長押ししたまま動かすと触れた範囲へ水を伸ばします。"
+                      : "混色パレット。選択中の絵の具はタップで真円の1単位、長押しで中心から濃くなり、そのまま動かすと選択色を波状に伸ばせます。"
               }
               data-testid="mix-canvas"
               onPointerDown={handlePointerDown}
               onPointerMove={handlePointerMove}
               onPointerUp={handlePointerUp}
-              onPointerCancel={() => {
-                pointerPath.current = [];
-                dragging.current = false;
+              onPointerCancel={(event) => {
+                if (activePointerId.current !== event.pointerId) return;
                 activePointerId.current = undefined;
+                activePointerSelection.current = undefined;
+                stopHoldPreview();
+                pointerPath.current = [];
+                stretching.current = false;
+                gestureCancelled.current = false;
+                stretchOriginDepositRef.current = 1;
                 redraw();
+              }}
+              onLostPointerCapture={(event) => {
+                if (activePointerId.current !== event.pointerId) return;
+                activePointerId.current = undefined;
+                activePointerSelection.current = undefined;
+                stopHoldPreview();
+                pointerPath.current = [];
+                stretching.current = false;
+                gestureCancelled.current = false;
+                stretchOriginDepositRef.current = 1;
+                redraw();
+              }}
+              onContextMenu={(event) => {
+                if (activePointerId.current !== undefined) {
+                  event.preventDefault();
+                }
               }}
               onKeyDown={(event) => {
                 if (event.target !== event.currentTarget) return;
@@ -1044,9 +1337,56 @@ export function MixingStudio({
                 height={canvasHeight}
                 aria-hidden="true"
               />
+              {holdPreview && (
+                <span
+                  className={`paint-hold-preview ${
+                    holdPreview.deposit > 1 ? "is-holding" : ""
+                  }`}
+                  style={
+                    {
+                      left: `${holdPreview.x * 100}%`,
+                      top: `${holdPreview.y * 100}%`,
+                      width: `${
+                        (sizeRadius[size] *
+                          2 *
+                          (holdPreview.role === "water"
+                            ? 1.42
+                            : holdSpread(holdPreview.deposit) *
+                              (1 +
+                                holdWaveAmplitude(
+                                  holdPreview.deposit,
+                                ))) *
+                          100) /
+                        CANVAS_WIDTH
+                      }%`,
+                      background: `radial-gradient(circle at 50% 48%, ${hexToRgba(
+                        holdPreview.color,
+                        Math.min(0.9, 0.56 + holdPreview.deposit * 0.04),
+                      )} 0 18%, ${hexToRgba(
+                        holdPreview.color,
+                        Math.min(0.82, 0.44 + holdPreview.deposit * 0.035),
+                      )} 52%, ${hexToRgba(
+                        holdPreview.color,
+                        0.12,
+                      )} 86%, transparent 100%)`,
+                      clipPath:
+                        holdPreview.role === "water"
+                          ? "circle(50% at 50% 50%)"
+                          : holdClipPath(
+                              holdPreview.seed,
+                              holdPreview.deposit,
+                            ),
+                    } as React.CSSProperties
+                  }
+                  data-deposit={holdPreview.deposit}
+                  data-testid="paint-hold-preview"
+                  aria-hidden="true"
+                />
+              )}
               <div
                 className="canvas-size-switcher"
                 aria-label="絵の具の表示サイズ"
+                onPointerDown={(event) => event.stopPropagation()}
               >
                 {(["small", "medium", "large"] as PaintSize[]).map((value) => (
                   <button
@@ -1054,24 +1394,12 @@ export function MixingStudio({
                     type="button"
                     className={size === value ? "is-selected" : ""}
                     aria-pressed={size === value}
-                    onPointerDown={(event) => event.stopPropagation()}
                     onClick={() => onSizeChange(value)}
                   >
                     {{ small: "小", medium: "中", large: "大" }[value]}
                   </button>
                 ))}
               </div>
-              {state.steps.length > 0 && (
-                <p className="canvas-gesture-hint" aria-hidden="true">
-                  {selectedRecipeColor
-                    ? `タップ：${selectedRecipeColor.name}の配合を1バッチ追加`
-                    : isPicker
-                      ? "タップ／なぞる：その場所の配合を調べる"
-                      : isWater
-                        ? "タップ／なぞる：触れた場所を濡らす"
-                        : "タップ：1単位　・　なぞる：混ぜる"}
-                </p>
-              )}
               {state.steps.length === 0 && (
                 <div className="canvas-onboarding" aria-hidden="true">
                   <span className="onboarding-drop">
@@ -1086,16 +1414,16 @@ export function MixingStudio({
                   </strong>
                   <p>
                     {selectedRecipeColor
-                      ? "1回のタップで元レシピを1バッチ"
+                      ? "タップで元レシピを1バッチ"
                       : isWater
-                        ? "タップでも、なぞっても使えます"
-                        : "1回のタップで1単位"}
+                        ? "長押ししたまま動かすと水が伸びます"
+                        : "タップは真円で1単位"}
                     <br />
                     {selectedRecipeColor
-                      ? "赤・青・黄・白・水を同じ割合で加えます"
+                      ? "長押しして動かしても元の配合比率を保ちます"
                       : isWater
                         ? "選んだ部分だけに水が広がります"
-                        : "なぞるほど、なめらかに混ざります"}
+                        : "長押ししたまま動かすと選んだ色が波状に伸びます"}
                   </p>
                 </div>
               )}

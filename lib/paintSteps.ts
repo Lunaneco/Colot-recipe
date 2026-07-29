@@ -1,5 +1,4 @@
 import {
-  EMPTY_RECIPE,
   MATERIAL_IDS,
   PIGMENT_IDS,
   type MaterialId,
@@ -7,16 +6,32 @@ import {
   type RecipeUnits,
 } from "./types";
 
+export function paintStepDeposit(step: PaintStep): number {
+  return step.deposit ?? 1;
+}
+
 export function paintStepUnits(step: PaintStep, material: MaterialId): number {
-  return step.recipe?.[material] ?? (step.material === material ? 1 : 0);
+  const batchUnits =
+    step.recipe === undefined
+      ? step.material === material
+        ? 1
+        : 0
+      : (step.recipe[material] ?? 0);
+  return batchUnits * paintStepDeposit(step);
 }
 
 export function paintStepRecipe(step: PaintStep): RecipeUnits {
-  if (step.recipe) return { ...step.recipe };
-  return {
-    ...EMPTY_RECIPE,
-    [step.material]: 1,
-  };
+  const deposit = paintStepDeposit(step);
+  return Object.fromEntries(
+    MATERIAL_IDS.map((material) => [
+      material,
+      (step.recipe === undefined
+        ? step.material === material
+          ? 1
+          : 0
+        : (step.recipe[material] ?? 0)) * deposit,
+    ]),
+  ) as RecipeUnits;
 }
 
 export function primaryMaterialForRecipe(recipe: RecipeUnits): MaterialId {

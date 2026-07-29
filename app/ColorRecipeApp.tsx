@@ -25,6 +25,7 @@ import { MixingStudio } from "../components/MixingStudio";
 import { SavedPalette } from "../components/SavedPalette";
 import { mixPaint } from "../lib/colorScience";
 import {
+  paintStepDeposit,
   paintStepRecipe,
   primaryMaterialForRecipe,
 } from "../lib/paintSteps";
@@ -51,6 +52,7 @@ import type {
   MixGesture,
   MixerTool,
   PaintSize,
+  PaintStep,
   RecipeUnits,
   SavedColor,
 } from "../lib/types";
@@ -82,6 +84,11 @@ type MixerState = {
   steps: SavedColor["steps"];
   mixGestures: SavedColor["mixGestures"];
 };
+
+type PaintPlacement = Pick<
+  PaintStep,
+  "deposit" | "shape" | "waveSeed"
+>;
 
 type MixerUiSettings = {
   selectedMaterial: MixerTool;
@@ -124,6 +131,7 @@ const MATERIAL_COLOR_STYLE = {
   "--material-red": MATERIAL_REGISTRY.red.color,
   "--material-blue": MATERIAL_REGISTRY.blue.color,
   "--material-yellow": MATERIAL_REGISTRY.yellow.color,
+  "--material-black": MATERIAL_REGISTRY.black.color,
 } as React.CSSProperties;
 
 const MIXER_SHORTCUTS = {
@@ -142,6 +150,21 @@ function createId(prefix: string) {
     return `${prefix}-${crypto.randomUUID()}`;
   }
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function normalizeStretchPoints(
+  points: Array<{ x: number; y: number }>,
+) {
+  return points
+    .filter(
+      (point) =>
+        Number.isFinite(point.x) && Number.isFinite(point.y),
+    )
+    .slice(0, 80)
+    .map((point) => ({
+      x: Math.min(1, Math.max(0, point.x)),
+      y: Math.min(1, Math.max(0, point.y)),
+    }));
 }
 
 function isEditableTarget(target: EventTarget | null) {
@@ -186,6 +209,18 @@ function addRecipeUnits(
     MATERIAL_IDS.map((material) => [
       material,
       current[material] + addition[material],
+    ]),
+  ) as RecipeUnits;
+}
+
+function scaleRecipeUnits(
+  recipe: RecipeUnits,
+  amount: number,
+): RecipeUnits {
+  return Object.fromEntries(
+    MATERIAL_IDS.map((material) => [
+      material,
+      recipe[material] * amount,
     ]),
   ) as RecipeUnits;
 }
@@ -536,10 +571,12 @@ export default function ColorRecipeApp() {
     size: PaintSize,
     x: number,
     y: number,
+    placement: PaintPlacement = {},
   ) => {
+    const deposit = placement.deposit ?? 1;
     const addition: RecipeUnits = {
       ...EMPTY_RECIPE,
-      [material]: 1,
+      [material]: deposit,
     };
     const nextRecipe = addRecipeUnits(mixer.state.recipe, addition);
     if (!recipeFitsSaveLimits(nextRecipe)) {
@@ -557,6 +594,7 @@ export default function ColorRecipeApp() {
           {
             id: createId("step"),
             material,
+            ...placement,
             size,
             x,
             y,
@@ -571,20 +609,30 @@ export default function ColorRecipeApp() {
       0,
     );
     setAnnouncement(
-      `${MATERIAL_LABELS[material]}を1単位追加。${MATERIAL_LABELS[material]}は${nextCount}単位、合計${nextTotal}単位`,
+      `${MATERIAL_LABELS[material]}を${deposit}単位追加。${MATERIAL_LABELS[material]}は${nextCount}単位、合計${nextTotal}単位`,
     );
   };
 
-  const addMaterialStroke = (
+  const stretchMaterial = (
     material: MaterialId,
     size: PaintSize,
     points: Array<{ x: number; y: number }>,
+    originDeposit: number,
+    waveSeed: number,
   ) => {
-    const placements = points.slice(0, 80);
+    const placements = normalizeStretchPoints(points);
     if (!placements.length) return false;
+    const safeOriginDeposit = Math.min(
+      8,
+      Math.max(2, Math.trunc(originDeposit)),
+    );
+    const safeWaveSeed = Number.isFinite(waveSeed)
+      ? Math.min(1, Math.max(0, waveSeed))
+      : 0;
+    const totalUnits = safeOriginDeposit + placements.length - 1;
     const addition: RecipeUnits = {
       ...EMPTY_RECIPE,
-      [material]: placements.length,
+      [material]: totalUnits,
     };
     if (
       !recipeFitsSaveLimits(
@@ -592,7 +640,7 @@ export default function ColorRecipeApp() {
       )
     ) {
       showToast(
-        "このなぞり量では配合の保存上限を超えるため、追加しませんでした",
+        "この長さでは配合の保存上限を超えるため、追加しませんでした",
       );
       return false;
     }
@@ -605,9 +653,23 @@ export default function ColorRecipeApp() {
         recipe: committedRecipe,
         steps: [
           ...current.steps,
-          ...placements.map((point) => ({
-            id: createId("step"),
+          {
+            id: createId("stretch-origin"),
             material,
+            deposit: safeOriginDeposit,
+            shape: "hold" as const,
+            waveSeed: safeWaveSeed,
+            size,
+            x: placements[0].x,
+            y: placements[0].y,
+            createdAt,
+          },
+          ...placements.slice(1).map((point, index) => ({
+            id: createId("stretch"),
+            material,
+            shape: "stroke" as const,
+            waveSeed:
+              (safeWaveSeed + (index + 1) * 0.618_033_988_75) % 1,
             size,
             x: point.x,
             y: point.y,
@@ -617,7 +679,7 @@ export default function ColorRecipeApp() {
       };
     });
     setAnnouncement(
-      `${MATERIAL_LABELS[material]}をなぞった場所へ${placements.length}単位追加しました`,
+      `${MATERIAL_LABELS[material]}を長押しから${placements.length}地点へ伸ばし、${totalUnits}単位追加しました`,
     );
     return true;
   };
@@ -650,9 +712,13 @@ export default function ColorRecipeApp() {
       steps: current.steps.filter((_, index) => index !== nearestIndex),
     }));
     if (target.recipe) {
-      setAnnouncement("保存レシピ1バッチを消しました");
+      setAnnouncement(
+        `保存レシピ${paintStepDeposit(target)}バッチを消しました`,
+      );
     } else {
-      setAnnouncement(`${MATERIAL_LABELS[target.material]}を1単位消しました`);
+      setAnnouncement(
+        `${MATERIAL_LABELS[target.material]}を${paintStepDeposit(target)}単位消しました`,
+      );
     }
   };
 
@@ -692,16 +758,19 @@ export default function ColorRecipeApp() {
     size: PaintSize,
     x: number,
     y: number,
+    placement: PaintPlacement = {},
   ) => {
+    const deposit = placement.deposit ?? 1;
     const batchTotal = MATERIAL_IDS.reduce(
       (total, material) => total + color.recipe[material],
       0,
-    );
+    ) * deposit;
     if (batchTotal <= 0) {
       showToast("この保存色には加えられる配合がありません");
       return;
     }
-    const nextRecipe = addRecipeUnits(mixer.state.recipe, color.recipe);
+    const scaledRecipe = scaleRecipeUnits(color.recipe, deposit);
+    const nextRecipe = addRecipeUnits(mixer.state.recipe, scaledRecipe);
     if (!recipeFitsSaveLimits(nextRecipe)) {
       showToast("配合の保存上限に達したため、このレシピ色は追加できません");
       return;
@@ -709,7 +778,7 @@ export default function ColorRecipeApp() {
 
     const batchRecipe = { ...color.recipe };
     mixer.commit((current) => {
-      const committedRecipe = addRecipeUnits(current.recipe, batchRecipe);
+      const committedRecipe = addRecipeUnits(current.recipe, scaledRecipe);
       if (!recipeFitsSaveLimits(committedRecipe)) return current;
       return {
         ...current,
@@ -720,6 +789,7 @@ export default function ColorRecipeApp() {
             id: createId("recipe-step"),
             material: primaryMaterialForRecipe(batchRecipe),
             recipe: batchRecipe,
+            ...placement,
             size,
             x,
             y,
@@ -730,15 +800,97 @@ export default function ColorRecipeApp() {
     });
     markColorAsRecent(color.id);
     const summary = MATERIAL_IDS
-      .filter((material) => batchRecipe[material] > 0)
+      .filter((material) => scaledRecipe[material] > 0)
       .map(
         (material) =>
-          `${MATERIAL_LABELS[material]}${batchRecipe[material]}単位`,
+          `${MATERIAL_LABELS[material]}${scaledRecipe[material]}単位`,
       )
       .join("、");
     setAnnouncement(
-      `保存色「${color.name}」を1バッチ追加。${summary}をそのまま加算しました`,
+      `保存色「${color.name}」を${deposit}バッチ追加。${summary}をそのまま加算しました`,
     );
+  };
+
+  const stretchRecipeColor = (
+    color: SavedColor,
+    size: PaintSize,
+    points: Array<{ x: number; y: number }>,
+    originDeposit: number,
+    waveSeed: number,
+  ) => {
+    const placements = normalizeStretchPoints(points);
+    if (!placements.length) return false;
+    const safeOriginDeposit = Math.min(
+      8,
+      Math.max(2, Math.trunc(originDeposit)),
+    );
+    const safeWaveSeed = Number.isFinite(waveSeed)
+      ? Math.min(1, Math.max(0, waveSeed))
+      : 0;
+    const batchRecipe = { ...color.recipe };
+    const batchUnits = MATERIAL_IDS.reduce(
+      (total, material) => total + batchRecipe[material],
+      0,
+    );
+    if (batchUnits <= 0) {
+      showToast("この保存色には伸ばせる配合がありません");
+      return false;
+    }
+    const batchCount = safeOriginDeposit + placements.length - 1;
+    const addition = scaleRecipeUnits(batchRecipe, batchCount);
+    if (
+      !recipeFitsSaveLimits(
+        addRecipeUnits(mixer.state.recipe, addition),
+      )
+    ) {
+      showToast(
+        "この長さでは配合の保存上限を超えるため、追加しませんでした",
+      );
+      return false;
+    }
+
+    const createdAt = new Date().toISOString();
+    const material = primaryMaterialForRecipe(batchRecipe);
+    mixer.commit((current) => {
+      const committedRecipe = addRecipeUnits(current.recipe, addition);
+      if (!recipeFitsSaveLimits(committedRecipe)) return current;
+      return {
+        ...current,
+        recipe: committedRecipe,
+        steps: [
+          ...current.steps,
+          {
+            id: createId("recipe-stretch-origin"),
+            material,
+            recipe: { ...batchRecipe },
+            deposit: safeOriginDeposit,
+            shape: "hold" as const,
+            waveSeed: safeWaveSeed,
+            size,
+            x: placements[0].x,
+            y: placements[0].y,
+            createdAt,
+          },
+          ...placements.slice(1).map((point, index) => ({
+            id: createId("recipe-stretch"),
+            material,
+            recipe: { ...batchRecipe },
+            shape: "stroke" as const,
+            waveSeed:
+              (safeWaveSeed + (index + 1) * 0.618_033_988_75) % 1,
+            size,
+            x: point.x,
+            y: point.y,
+            createdAt,
+          })),
+        ],
+      };
+    });
+    markColorAsRecent(color.id);
+    setAnnouncement(
+      `保存色「${color.name}」を長押しから${placements.length}地点へ伸ばし、元の配合を${batchCount}バッチ追加しました`,
+    );
+    return true;
   };
 
   const openSaveDialog = (sample?: SpatialPaintSample) => {
@@ -800,9 +952,9 @@ export default function ColorRecipeApp() {
             const hasManualMix = mixer.state.mixGestures.some(
               (gesture) => gesture.kind !== "all",
             );
-            if (hasMixAll && hasManualMix) return "すべて混ぜる＋手混ぜ";
+            if (hasMixAll && hasManualMix) return "すべて混ぜる＋旧版の手混ぜ";
             if (hasMixAll) return "すべて混ぜる";
-            if (hasManualMix) return "指やマウスでなぞって混色";
+            if (hasManualMix) return "旧版の手混ぜ";
             return "絵の具を重ね置き";
           })(),
       createdAt: now,
@@ -1131,10 +1283,10 @@ export default function ColorRecipeApp() {
                 onSelectRecipeColor={useRecipeColorInMixer}
                 onSizeChange={setPaintSize}
                 onAdd={addMaterial}
-                onAddStroke={addMaterialStroke}
+                onStretchMaterial={stretchMaterial}
                 onAddRecipe={addRecipeColor}
+                onStretchRecipe={stretchRecipeColor}
                 onErase={eraseNearest}
-                onMix={addMixGesture}
                 onMixAll={mixAll}
                 onClear={() => {
                   mixer.commit({
@@ -1326,7 +1478,7 @@ export default function ColorRecipeApp() {
                 <span>1</span>
                 <div>
                   <strong>絵の具を選ぶ</strong>
-                  <p>赤・青・黄・白・水から、置きたい材料を選びます。</p>
+                  <p>赤・青・黄・黒・白・水から、置きたい材料を選びます。</p>
                 </div>
               </li>
               <li>
@@ -1339,8 +1491,8 @@ export default function ColorRecipeApp() {
               <li>
                 <span>3</span>
                 <div>
-                  <strong>なぞって混ぜる</strong>
-                  <p>速く動かすと広く、ゆっくり動かすと丁寧に混ざります。</p>
+                  <strong>長押しして色を伸ばす</strong>
+                  <p>選んだ色を長押ししたまま動かすと、配合を保って波状に伸びます。</p>
                 </div>
               </li>
             </ol>
