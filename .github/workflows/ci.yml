@@ -34,8 +34,8 @@ jobs:
       - name: Unit, build, and static HTML checks
         run: npm test
 
-      - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+      - name: Install desktop and mobile browser engines
+        run: npx playwright install --with-deps chromium webkit
 
       - name: Browser tests against the GitHub Pages build
         run: npm run test:e2e:static

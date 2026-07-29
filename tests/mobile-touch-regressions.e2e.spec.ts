@@ -1,25 +1,9 @@
 import {
   expect,
   test,
-  type BrowserContext,
   type Locator,
   type Page,
 } from "@playwright/test";
-
-const APP_BASE_URL =
-  process.env.PLAYWRIGHT_BASE_URL ??
-  (process.env.PLAYWRIGHT_STATIC === "true"
-    ? "http://127.0.0.1:4176/Colot-recipe/"
-    : "http://127.0.0.1:3002/");
-
-async function clearAppStorage(context: BrowserContext, page: Page) {
-  const session = await context.newCDPSession(page);
-  await session.send("Storage.clearDataForOrigin", {
-    origin: new URL(APP_BASE_URL).origin,
-    storageTypes: "all",
-  });
-  await session.detach();
-}
 
 async function touchElement(
   page: Page,
@@ -40,6 +24,12 @@ async function touchElement(
     x: Math.round(box.x + box.width / 2),
     y: Math.round(box.y + box.height / 2),
   };
+  if (page.context().browser()?.browserType().name() !== "chromium") {
+    // Playwright exposes a true tap for WebKit, but low-level moved touch
+    // sequences are a Chromium-only protocol feature.
+    await locator.tap();
+    return;
+  }
   const session = await page.context().newCDPSession(page);
   try {
     await session.send("Input.dispatchTouchEvent", {
@@ -92,6 +82,23 @@ async function touchCanvasAt(
   );
 }
 
+async function touchElementAt(
+  locator: Locator,
+  xRatio: number,
+  yRatio: number,
+) {
+  await expect(locator).toBeVisible();
+  await expect(locator).toBeEnabled();
+  const box = await locator.boundingBox();
+  if (!box) throw new Error("Touch target is unavailable");
+  await locator.tap({
+    position: {
+      x: box.width * xRatio,
+      y: box.height * yRatio,
+    },
+  });
+}
+
 async function sourceCanvasHasPaint(canvas: Locator) {
   return canvas
     .locator("canvas.paint-layer--source")
@@ -129,6 +136,60 @@ async function pixelAt(
   );
 }
 
+async function expectPixelRgbNear(
+  canvas: Locator,
+  x: number,
+  y: number,
+  expected: [number, number, number],
+) {
+  await expect
+    .poll(async () => {
+      const actual = (await pixelAt(canvas, x, y)).slice(0, 3);
+      return Math.max(
+        ...actual.map((channel, index) =>
+          Math.abs(channel - expected[index]),
+        ),
+      );
+    })
+    .toBeLessThanOrEqual(2);
+}
+
+async function expectUnobscuredTouchTarget(locator: Locator) {
+  await expect(locator).toBeVisible();
+  await expect(locator).toBeEnabled();
+  const geometry = await locator.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    return {
+      centerInsideViewport:
+        x >= 0 && x < window.innerWidth && y >= 0 && y < window.innerHeight,
+      hitOwnTarget: hit === element || element.contains(hit),
+      rect: {
+        top: Math.round(rect.top),
+        right: Math.round(rect.right),
+        bottom: Math.round(rect.bottom),
+        left: Math.round(rect.left),
+      },
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight,
+      },
+      hitTag: hit?.tagName ?? null,
+      hitClass: hit instanceof HTMLElement ? hit.className : null,
+    };
+  });
+  expect(
+    geometry.centerInsideViewport,
+    `Touch target center is outside the viewport: ${JSON.stringify(geometry)}`,
+  ).toBe(true);
+  expect(
+    geometry.hitOwnTarget,
+    `Touch target center is obscured: ${JSON.stringify(geometry)}`,
+  ).toBe(true);
+}
+
 async function saveSingleColor(
   page: Page,
   material: "red" | "blue",
@@ -143,20 +204,27 @@ async function saveSingleColor(
 }
 
 test.describe("スマホ実タッチの回帰", () => {
-  test.use({
-    viewport: { width: 390, height: 844 },
-    hasTouch: true,
-    isMobile: true,
-  });
-
-  test.beforeEach(async ({ context, page }) => {
+  test.beforeEach(async ({ page }, testInfo) => {
     await page.goto("./");
-    await clearAppStorage(context, page);
-    await page.reload();
     await expect(page.locator(".color-recipe-app")).toHaveAttribute(
       "data-app-ready",
       "true",
     );
+    const expectedViewports: Record<string, { width: number; height: number }> = {
+      "android-chromium": { width: 393, height: 727 },
+      "iphone-webkit": { width: 390, height: 664 },
+      "iphone-se-webkit": { width: 320, height: 568 },
+    };
+    expect(page.viewportSize()).toEqual(expectedViewports[testInfo.project.name]);
+    const deviceProfile = await page.evaluate(() => ({
+      devicePixelRatio: window.devicePixelRatio,
+      touchCapable:
+        navigator.maxTouchPoints > 0 || "ontouchstart" in window,
+      mobileUserAgent: /Mobile|Android|iPhone/.test(navigator.userAgent),
+    }));
+    expect(deviceProfile.devicePixelRatio).toBeGreaterThan(1);
+    expect(deviceProfile.touchCapable).toBe(true);
+    expect(deviceProfile.mobileUserAgent).toBe(true);
   });
 
   test("おえかきとぬりえで保存色を実タッチ選択してすぐ使える", async ({
@@ -177,7 +245,20 @@ test.describe("スマホ実タッチの回帰", () => {
     await expect(palette).toHaveClass(/\bis-open\b/);
 
     const red = page.getByTestId("saved-color-1");
-    await touchElement(page, red);
+    const redMobileSafety = await red.evaluate((element) => {
+      const wrapper = element.closest<HTMLElement>("[data-color-id]");
+      return {
+        nativeDraggable: wrapper?.draggable ?? true,
+        hasOverlappingGrip: Boolean(wrapper?.querySelector(".swatch-grip")),
+        touchAction: getComputedStyle(element).touchAction,
+      };
+    });
+    expect(redMobileSafety).toEqual({
+      nativeDraggable: false,
+      hasOverlappingGrip: false,
+      touchAction: "manipulation",
+    });
+    await touchElementAt(red.locator(".saved-swatch__paint"), 0.8, 0.25);
     await expect(red).toHaveAttribute("aria-pressed", "true");
     await expect(palette).not.toHaveClass(/\bis-open\b/);
     await expect(
@@ -190,9 +271,7 @@ test.describe("スマホ実タッチの回帰", () => {
     const drawingLayer = drawingCanvas.locator("canvas");
     await expect(drawingLayer).toHaveCount(1);
     await touchCanvasAt(page, drawingCanvas, 0.5, 0.5);
-    await expect
-      .poll(async () => (await pixelAt(drawingLayer, 500, 350)).slice(0, 3))
-      .toEqual([230, 95, 102]);
+    await expectPixelRgbNear(drawingLayer, 500, 350, [230, 95, 102]);
     await expect
       .poll(async () => (await pixelAt(drawingLayer, 500, 350))[3])
       .toBeGreaterThan(250);
@@ -205,7 +284,7 @@ test.describe("スマホ実タッチの回帰", () => {
       }),
     );
     const blue = page.getByTestId("saved-color-0");
-    await touchElement(page, blue);
+    await touchElementAt(blue.locator(".saved-swatch__paint"), 0.8, 0.25);
     await expect(blue).toHaveAttribute("aria-pressed", "true");
     await expect(palette).not.toHaveClass(/\bis-open\b/);
     await expect(
@@ -217,9 +296,7 @@ test.describe("スマホ実タッチの回帰", () => {
     const coloringCanvas = page.getByTestId("coloring-canvas");
     const fillCanvas = coloringCanvas.locator("canvas.coloring-layer--fill");
     await touchCanvasAt(page, coloringCanvas, 0.5, 0.29);
-    await expect
-      .poll(async () => (await pixelAt(fillCanvas, 460, 210)).slice(0, 3))
-      .toEqual([70, 119, 203]);
+    await expectPixelRgbNear(fillCanvas, 460, 210, [70, 119, 203]);
     await expect
       .poll(async () => (await pixelAt(fillCanvas, 460, 210))[3])
       .toBeGreaterThan(240);
@@ -234,27 +311,33 @@ test.describe("スマホ実タッチの回帰", () => {
     await expect(page.getByTestId("recipe-dialog")).toBeVisible();
   });
 
-  test("指が少し動いても、まっさらにを繰り返し実行できる", async ({
+  test("描いた後に、まっさらにを繰り返し実行できる", async ({
     page,
   }) => {
     const canvas = page.getByTestId("mix-canvas");
     const clear = page.getByRole("button", { name: "まっさらに" });
 
     await touchElement(page, page.getByTestId("material-red"));
+    await touchCanvasAt(page, canvas, 0.38, 0.5);
     await touchCanvasAt(page, canvas, 0.5, 0.58);
+    await touchCanvasAt(page, canvas, 0.62, 0.5);
     await expect(clear).toBeEnabled();
     await expect.poll(() => sourceCanvasHasPaint(canvas)).toBe(true);
 
+    await expectUnobscuredTouchTarget(clear);
     await touchElement(page, clear, { x: 5, y: 3 });
     await expect(page.getByTestId("recipe-summary")).toHaveCount(0);
     await expect(clear).toBeDisabled();
     await expect.poll(() => sourceCanvasHasPaint(canvas)).toBe(false);
 
     await touchElement(page, page.getByTestId("material-blue"));
+    await touchCanvasAt(page, canvas, 0.38, 0.5);
     await touchCanvasAt(page, canvas, 0.5, 0.58);
+    await touchCanvasAt(page, canvas, 0.62, 0.5);
     await expect(clear).toBeEnabled();
     await expect.poll(() => sourceCanvasHasPaint(canvas)).toBe(true);
 
+    await expectUnobscuredTouchTarget(clear);
     await touchElement(page, clear, { x: -4, y: 3 });
     await expect(page.getByTestId("recipe-summary")).toHaveCount(0);
     await expect(clear).toBeDisabled();

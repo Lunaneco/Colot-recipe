@@ -333,7 +333,7 @@ export function SavedPalette({
                     key={color.id}
                     role="listitem"
                     data-color-id={color.id}
-                    draggable
+                    draggable={!compactDrawer}
                     onDragStart={(event) => {
                       event.dataTransfer.effectAllowed = "move";
                       event.dataTransfer.setData("text/plain", color.id);
@@ -397,33 +397,44 @@ export function SavedPalette({
                       </span>
                       <span className="saved-swatch__name">{color.name}</span>
                     </button>
-                    <button
-                      className="swatch-grip"
-                      type="button"
-                      aria-label={`${color.name}を並べ替える`}
-                      aria-describedby="palette-reorder-help"
-                      aria-keyshortcuts="ArrowUp ArrowDown"
-                      title="長押しまたはドラッグで並べ替え"
-                      onClick={(event) => event.stopPropagation()}
-                      onKeyDown={(event) => {
-                        if (event.key === "ArrowUp" && index > 0) {
-                          event.preventDefault();
-                          reorderWithAnnouncement(color.id, colors[index - 1].id);
+                    {!compactDrawer && (
+                      <button
+                        className="swatch-grip"
+                        type="button"
+                        aria-label={`${color.name}を並べ替える`}
+                        aria-describedby="palette-reorder-help"
+                        aria-keyshortcuts="ArrowUp ArrowDown"
+                        title="長押しまたはドラッグで並べ替え"
+                        onClick={(event) => event.stopPropagation()}
+                        onKeyDown={(event) => {
+                          if (event.key === "ArrowUp" && index > 0) {
+                            event.preventDefault();
+                            reorderWithAnnouncement(
+                              color.id,
+                              colors[index - 1].id,
+                            );
+                          }
+                          if (
+                            event.key === "ArrowDown" &&
+                            index < colors.length - 1
+                          ) {
+                            event.preventDefault();
+                            reorderWithAnnouncement(
+                              color.id,
+                              colors[index + 1].id,
+                            );
+                          }
+                        }}
+                        onPointerDown={(event) =>
+                          beginPointerReorder(event, color.id)
                         }
-                        if (event.key === "ArrowDown" && index < colors.length - 1) {
-                          event.preventDefault();
-                          reorderWithAnnouncement(color.id, colors[index + 1].id);
-                        }
-                      }}
-                      onPointerDown={(event) =>
-                        beginPointerReorder(event, color.id)
-                      }
-                      onPointerMove={movePointerReorder}
-                      onPointerUp={finishPointerReorder}
-                      onPointerCancel={clearPointerReorder}
-                    >
-                      <GripVertical size={12} aria-hidden="true" />
-                    </button>
+                        onPointerMove={movePointerReorder}
+                        onPointerUp={finishPointerReorder}
+                        onPointerCancel={clearPointerReorder}
+                      >
+                        <GripVertical size={12} aria-hidden="true" />
+                      </button>
+                    )}
                   </div>
                 );
               })}
