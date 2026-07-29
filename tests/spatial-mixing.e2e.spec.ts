@@ -71,6 +71,69 @@ async function renderedScreenshotPixelAt(
   );
 }
 
+function visibleLuminanceOnWhite(pixel: number[]) {
+  const alpha = pixel[3] / 255;
+  const composite = pixel
+    .slice(0, 3)
+    .map((channel) => channel * alpha + 255 * (1 - alpha));
+  return (
+    composite[0] * 0.2126 +
+    composite[1] * 0.7152 +
+    composite[2] * 0.0722
+  );
+}
+
+test("同じ場所へ同じ絵の具を重ねると表示色が濃くなる", async ({
+  page,
+}) => {
+  await page.goto("./");
+  await expect(page.locator(".color-recipe-app")).toHaveAttribute(
+    "data-app-ready",
+    "true",
+  );
+  await page.addStyleTag({
+    content:
+      ".canvas-onboarding,.canvas-gesture-hint,.sample-point-marker{display:none!important}",
+  });
+  const canvas = page.getByTestId("mix-canvas");
+  const source = canvas.locator("canvas.paint-layer--source");
+  const point = { x: 0.5, y: 0.58 };
+
+  await page.getByTestId("material-red").click();
+  await clickCanvasAtRatio(canvas, point.x, point.y);
+  await expect(page.getByTestId("recipe-red")).toHaveText("1");
+  await expect
+    .poll(async () => (await sourcePixelAt(source, point.x, point.y))[3])
+    .toBeGreaterThan(0);
+  const firstLayer = await sourcePixelAt(source, point.x, point.y);
+  const firstRendered = await renderedScreenshotPixelAt(
+    page,
+    canvas,
+    point.x,
+    point.y,
+  );
+
+  await clickCanvasAtRatio(canvas, point.x, point.y);
+  await expect(page.getByTestId("recipe-red")).toHaveText("2");
+  await expect
+    .poll(async () => {
+      const secondLayer = await sourcePixelAt(source, point.x, point.y);
+      return visibleLuminanceOnWhite(firstLayer) -
+        visibleLuminanceOnWhite(secondLayer);
+    })
+    .toBeGreaterThan(8);
+  const secondRendered = await renderedScreenshotPixelAt(
+    page,
+    canvas,
+    point.x,
+    point.y,
+  );
+  expect(
+    visibleLuminanceOnWhite(firstRendered) -
+      visibleLuminanceOnWhite(secondRendered),
+  ).toBeGreaterThan(6);
+});
+
 test("重なった場所をスポイトで調べると局所顔料比率が変わる", async ({
   page,
 }) => {
