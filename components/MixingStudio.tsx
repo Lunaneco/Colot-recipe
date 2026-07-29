@@ -32,6 +32,7 @@ import type {
   PaintSize,
   PaintStep,
   RecipeUnits,
+  SavedColor,
 } from "../lib/types";
 import {
   MATERIAL_COLORS,
@@ -46,6 +47,7 @@ import {
   type SpatialPaintSample,
 } from "../lib/spatialMix";
 import { rgbToHex, rgbToHsl } from "../lib/colorScience";
+import { paintStepUnits } from "../lib/paintSteps";
 import { RecipeInspector } from "./RecipeInspector";
 
 type MixerState = {
@@ -63,13 +65,22 @@ type MixingStudioProps = {
   canUndo: boolean;
   canRedo: boolean;
   announcement: string;
+  recipeColors: SavedColor[];
+  selectedRecipeColor?: SavedColor;
   onSelectMaterial: (material: MixerTool) => void;
+  onSelectRecipeColor: (color: SavedColor) => void;
   onSizeChange: (size: PaintSize) => void;
   onAdd: (material: MaterialId, size: PaintSize, x: number, y: number) => void;
   onAddStroke: (
     material: MaterialId,
     size: PaintSize,
     points: Array<{ x: number; y: number }>,
+  ) => boolean;
+  onAddRecipe: (
+    color: SavedColor,
+    size: PaintSize,
+    x: number,
+    y: number,
   ) => void;
   onErase: (x: number, y: number) => void;
   onMix: (gesture: Omit<MixGesture, "id" | "createdAt">) => void;
@@ -150,6 +161,9 @@ const materialButtons: Array<{
   { id: "picker", label: "スポイト", shortcut: "I" },
 ];
 
+const isMaterialTool = (tool: MixerTool): tool is MaterialId =>
+  (MATERIAL_IDS as readonly MixerTool[]).includes(tool);
+
 function hashNoise(seed: number) {
   const value = Math.sin(seed * 12.9898) * 43758.5453;
   return value - Math.floor(value);
@@ -173,9 +187,16 @@ function drawPaintDab(
   const x = step.x * CANVAS_WIDTH + offset.x;
   const y = step.y * canvasHeight + offset.y;
   const radius = sizeRadius[step.size];
+  const waterUnits = paintStepUnits(step, "water");
+  const pigmentUnits = PIGMENT_IDS.reduce(
+    (total, pigment) => total + paintStepUnits(step, pigment),
+    0,
+  );
 
-  if (step.material === "water") {
+  if (waterUnits > 0) {
     context.save();
+    context.globalAlpha =
+      0.25 + 0.75 * (waterUnits / Math.max(1, waterUnits + pigmentUnits));
     context.globalCompositeOperation = "screen";
     const gradient = context.createRadialGradient(
       x - radius * 0.25,
@@ -364,10 +385,14 @@ export function MixingStudio({
   canUndo,
   canRedo,
   announcement,
+  recipeColors,
+  selectedRecipeColor,
   onSelectMaterial,
+  onSelectRecipeColor,
   onSizeChange,
   onAdd,
   onAddStroke,
+  onAddRecipe,
   onErase,
   onMix,
   onMixAll,
@@ -399,8 +424,11 @@ export function MixingStudio({
   const [canvasHeight, setCanvasHeight] = useState(DEFAULT_CANVAS_HEIGHT);
   const [samplePoint, setSamplePoint] = useState<{ x: number; y: number }>();
   const [sampledPaint, setSampledPaint] = useState<SpatialPaintSample>();
+  const isPicker = !selectedRecipeColor && selectedMaterial === "picker";
+  const isWater = !selectedRecipeColor && selectedMaterial === "water";
+  const isEraser = !selectedRecipeColor && selectedMaterial === "eraser";
   const activeSampledPaint =
-    selectedMaterial === "picker" ? sampledPaint : undefined;
+    isPicker ? sampledPaint : undefined;
   const pigmentUnits = useMemo(
     () =>
       PIGMENT_IDS.reduce(
@@ -409,6 +437,18 @@ export function MixingStudio({
       ),
     [state.recipe],
   );
+  const recipeUnits = useMemo(
+    () =>
+      MATERIAL_IDS.reduce(
+        (total, material) => total + state.recipe[material],
+        0,
+      ),
+    [state.recipe],
+  );
+  const hasPaletteContent =
+    recipeUnits > 0 ||
+    state.steps.length > 0 ||
+    state.mixGestures.length > 0;
   const sampleAnnouncement = useMemo(() => {
     if (!activeSampledPaint) return "";
     const ratio = PIGMENT_IDS
@@ -574,7 +614,7 @@ export function MixingStudio({
     context.clearRect(0, 0, CANVAS_WIDTH, canvasHeight);
     drawSpatialMixField(context, state, canvasHeight);
     state.steps.forEach((step, index) => {
-      if (step.material === "water") {
+      if (paintStepUnits(step, "water") > 0) {
         drawPaintDab(context, step, index, canvasHeight);
       }
     });
@@ -586,11 +626,11 @@ export function MixingStudio({
   }, [redraw]);
 
   useEffect(() => {
-    if (selectedMaterial !== "picker" || !samplePoint) return;
+    if (!isPicker || !samplePoint) return;
     const point = samplePoint;
     const frame = window.requestAnimationFrame(() => captureSample(point));
     return () => window.cancelAnimationFrame(frame);
-  }, [captureSample, samplePoint, selectedMaterial]);
+  }, [captureSample, isPicker, samplePoint]);
 
   useEffect(
     () => () => {
@@ -767,11 +807,15 @@ export function MixingStudio({
     const speed = distance / elapsed;
     context.save();
     context.lineCap = "round";
-    if (selectedMaterial === "water") {
+    if (isWater) {
       context.globalCompositeOperation = "screen";
       context.strokeStyle = "rgba(106, 176, 190, 0.24)";
     } else {
-      context.strokeStyle = hexToRgba(mixed.hex, 0.24);
+      const previewColor =
+        pigmentUnits === 0 && isMaterialTool(selectedMaterial)
+          ? MATERIAL_COLORS[selectedMaterial]
+          : mixed.hex;
+      context.strokeStyle = hexToRgba(previewColor, 0.24);
     }
     context.lineWidth = Math.max(34, Math.min(130, 44 + speed * 70));
     context.beginPath();
@@ -789,7 +833,7 @@ export function MixingStudio({
     const point = toNormalizedPoint(event);
     pointerPath.current = [point];
     dragging.current = false;
-    if (selectedMaterial === "picker") {
+    if (isPicker) {
       captureSampleAt({ x: point.x, y: point.y });
     }
   };
@@ -798,7 +842,7 @@ export function MixingStudio({
     if (activePointerId.current !== event.pointerId) return;
     if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
     const point = toNormalizedPoint(event);
-    if (selectedMaterial === "picker") {
+    if (isPicker) {
       scheduleSampleAt({ x: point.x, y: point.y });
       return;
     }
@@ -806,11 +850,15 @@ export function MixingStudio({
     const distance = previous
       ? Math.hypot(point.x - previous.x, point.y - previous.y)
       : 0;
-    if (distance < 0.004) return;
+    const dragThreshold = event.pointerType === "touch" ? 0.012 : 0.004;
+    if (distance < dragThreshold) return;
     pointerPath.current.push(point);
     if (pointerPath.current.length > 1) {
       dragging.current = true;
-      if (selectedMaterial === "water" || pigmentUnits > 0) {
+      if (
+        !selectedRecipeColor &&
+        (isWater || pigmentUnits > 0 || isMaterialTool(selectedMaterial))
+      ) {
         previewStroke(pointerPath.current);
       }
     }
@@ -824,22 +872,34 @@ export function MixingStudio({
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
 
-    if (selectedMaterial === "picker") {
+    if (isPicker) {
       if (sampleFrameRef.current) {
         window.cancelAnimationFrame(sampleFrameRef.current);
         sampleFrameRef.current = undefined;
       }
       pendingSamplePoint.current = undefined;
       captureSampleAt({ x: point.x, y: point.y });
+    } else if (selectedRecipeColor) {
+      onAddRecipe(selectedRecipeColor, size, point.x, point.y);
     } else if (!dragging.current) {
-      if (selectedMaterial === "eraser") onErase(point.x, point.y);
-      else onAdd(selectedMaterial, size, point.x, point.y);
-    } else if (selectedMaterial === "water") {
-      onAddStroke(
+      if (isEraser) onErase(point.x, point.y);
+      else if (isMaterialTool(selectedMaterial)) {
+        onAdd(selectedMaterial, size, point.x, point.y);
+      }
+    } else if (isWater) {
+      const added = onAddStroke(
         "water",
         size,
         resamplePath(path, size, canvasHeight),
       );
+      if (!added) redraw();
+    } else if (pigmentUnits === 0 && isMaterialTool(selectedMaterial)) {
+      const added = onAddStroke(
+        selectedMaterial,
+        size,
+        resamplePath(path, size, canvasHeight),
+      );
+      if (!added) redraw();
     } else if (pigmentUnits > 0) {
       let distance = 0;
       for (let index = 1; index < path.length; index += 1) {
@@ -879,15 +939,17 @@ export function MixingStudio({
 
           <div
             ref={paintSurface}
-            className={`paint-surface ${selectedMaterial === "picker" ? "is-sampling" : ""}`}
+            className={`paint-surface ${isPicker ? "is-sampling" : ""}`}
             role="application"
             tabIndex={0}
             aria-label={
-              selectedMaterial === "picker"
+              selectedRecipeColor
+                ? `混色パレット。保存色「${selectedRecipeColor.name}」を置くにはタップします。元の配合を1バッチそのまま加えます。`
+                : isPicker
                 ? "混色パレット。調べたい場所をタップまたはなぞると、その地点の配合比率を表示します。矢印キーでも調べる場所を移動できます。"
-                : selectedMaterial === "water"
+                : isWater
                   ? "混色パレット。タップまたはなぞって、触れた場所だけを濡らします。"
-                : "混色パレット。選択中の材料を置くにはタップ、混ぜるにはドラッグします。"
+                  : "混色パレット。選択中の材料を置くにはタップ、混ぜるにはドラッグします。"
             }
             data-testid="mix-canvas"
             onPointerDown={handlePointerDown}
@@ -902,7 +964,7 @@ export function MixingStudio({
             onKeyDown={(event) => {
               if (event.target !== event.currentTarget) return;
               if (
-                selectedMaterial === "picker" &&
+                isPicker &&
                 ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(
                   event.key,
                 )
@@ -940,10 +1002,14 @@ export function MixingStudio({
               }
               if (event.key === "Enter" || event.key === " ") {
                 event.preventDefault();
-                if (selectedMaterial === "picker") {
+                if (selectedRecipeColor) {
+                  onAddRecipe(selectedRecipeColor, size, 0.5, 0.5);
+                } else if (isPicker) {
                   captureSampleAt({ x: 0.5, y: 0.5 });
-                } else if (selectedMaterial === "eraser") onErase(0.5, 0.5);
-                else onAdd(selectedMaterial, size, 0.5, 0.5);
+                } else if (isEraser) onErase(0.5, 0.5);
+                else if (isMaterialTool(selectedMaterial)) {
+                  onAdd(selectedMaterial, size, 0.5, 0.5);
+                }
               }
             }}
           >
@@ -954,7 +1020,7 @@ export function MixingStudio({
               height={canvasHeight}
               aria-hidden="true"
             />
-            {selectedMaterial === "picker" && samplePoint && (
+            {isPicker && samplePoint && (
               <span
                 className="sample-point-marker"
                 style={{
@@ -989,9 +1055,11 @@ export function MixingStudio({
             </div>
             {state.steps.length > 0 && (
               <p className="canvas-gesture-hint" aria-hidden="true">
-                {selectedMaterial === "picker"
+                {selectedRecipeColor
+                  ? `タップ：${selectedRecipeColor.name}の配合を1バッチ追加`
+                  : isPicker
                   ? "タップ／なぞる：その場所の配合を調べる"
-                  : selectedMaterial === "water"
+                  : isWater
                     ? "タップ／なぞる：触れた場所を濡らす"
                     : "タップ：1単位　・　なぞる：混ぜる"}
               </p>
@@ -1002,16 +1070,22 @@ export function MixingStudio({
                   <Droplet size={28} />
                 </span>
                 <strong>
-                  {selectedMaterial === "water"
+                  {selectedRecipeColor
+                    ? `「${selectedRecipeColor.name}」をここに置く`
+                    : isWater
                     ? "ここをなぞって、紙を濡らす"
                     : "絵の具を選んで、ここに置く"}
                 </strong>
                 <p>
-                  {selectedMaterial === "water"
+                  {selectedRecipeColor
+                    ? "1回のタップで元レシピを1バッチ"
+                    : isWater
                     ? "タップでも、なぞっても使えます"
                     : "1回のタップで1単位"}
                   <br />
-                  {selectedMaterial === "water"
+                  {selectedRecipeColor
+                    ? "赤・青・黄・白・水を同じ割合で加えます"
+                    : isWater
                     ? "選んだ部分だけに水が広がります"
                     : "なぞるほど、なめらかに混ざります"}
                 </p>
@@ -1022,8 +1096,11 @@ export function MixingStudio({
                 type="button"
                 className="subtle-button"
                 onPointerDown={(event) => event.stopPropagation()}
-                onClick={onClear}
-                disabled={!state.steps.length}
+                onClick={() => {
+                  clearSample();
+                  onClear();
+                }}
+                disabled={!hasPaletteContent}
               >
                 <Trash2 size={16} aria-hidden="true" />
                 まっさらに
@@ -1047,7 +1124,7 @@ export function MixingStudio({
           recipe={state.recipe}
           mixed={mixed}
           sampled={activeSampledPaint}
-          sampling={selectedMaterial === "picker"}
+          sampling={isPicker}
           detailed={detailed}
           onToggleDetailed={onToggleDetailed}
           onClearSample={clearSample}
@@ -1056,9 +1133,14 @@ export function MixingStudio({
       </div>
 
       <div className="material-dock" aria-label="材料と操作">
-        <div className="materials-group" role="toolbar" aria-label="絵の具を選ぶ">
+        <div
+          className="materials-group"
+          role="toolbar"
+          aria-label="絵の具と保存レシピ色を選ぶ"
+        >
           {materialButtons.map((material) => {
-            const selected = selectedMaterial === material.id;
+            const selected =
+              !selectedRecipeColor && selectedMaterial === material.id;
             return (
               <button
                 key={material.id}
@@ -1084,6 +1166,56 @@ export function MixingStudio({
                   </span>
                 )}
                 <kbd>{material.shortcut}</kbd>
+              </button>
+            );
+          })}
+          {recipeColors.length > 0 && (
+            <span className="recipe-material-label" aria-hidden="true">
+              レシピ色
+            </span>
+          )}
+          {recipeColors.map((color, index) => {
+            const selected = selectedRecipeColor?.id === color.id;
+            const summary = MATERIAL_IDS
+              .filter((material) => color.recipe[material] > 0)
+              .map(
+                (material) =>
+                  `${MATERIAL_LABELS[material]}${color.recipe[material]}`,
+              )
+              .join("・");
+            return (
+              <button
+                key={color.id}
+                className={`material-button material-button--recipe ${selected ? "is-selected" : ""}`}
+                type="button"
+                aria-pressed={selected}
+                aria-label={`保存色「${color.name}」を混色材料にする。配合は${summary}`}
+                title={`${color.name}：${summary}`}
+                onClick={() => {
+                  clearSample();
+                  onSelectRecipeColor(color);
+                }}
+                data-testid={`recipe-material-${index}`}
+              >
+                <span
+                  className="material-button__blob"
+                  aria-hidden="true"
+                  style={
+                    {
+                      "--recipe-material": color.mixed.hex,
+                      "--recipe-material-opacity": `${Math.round(
+                        Math.max(0.3, color.mixed.opacity) * 100,
+                      )}%`,
+                    } as React.CSSProperties
+                  }
+                />
+                <span>{color.name}</span>
+                {selected && (
+                  <span className="material-selected-mark" aria-hidden="true">
+                    <Check size={11} strokeWidth={3} />
+                  </span>
+                )}
+                <small className="recipe-material-ratio">{summary}</small>
               </button>
             );
           })}

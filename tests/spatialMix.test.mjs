@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { mixPaint } from "../lib/colorScience.ts";
-import { sampleSpatialPaint } from "../lib/spatialMix.ts";
+import {
+  createSpatialPaintSampler,
+  sampleSpatialPaint,
+} from "../lib/spatialMix.ts";
 
 const createdAt = "2026-07-28T00:00:00.000Z";
 
@@ -29,6 +32,106 @@ test("重なりの中心では各絵の具の局所比率が更新される", ()
   assert.ok(overlap.pigmentRatio.yellow > 0.49);
   assert.ok(overlap.pigmentRatio.yellow < 0.51);
   assert.equal(overlap.mixed.name, "夕焼けオレンジ");
+});
+
+test("保存レシピのcompound stepは全成分を一つの地点へ正確に加算する", () => {
+  const recipe = { red: 2, blue: 1, yellow: 3, white: 4, water: 5 };
+  const state = {
+    recipe,
+    steps: [
+      {
+        ...step("saved-recipe-batch", "yellow", 0.5, 0.5),
+        recipe: { ...recipe },
+      },
+    ],
+    mixGestures: [],
+  };
+
+  const direct = sampleSpatialPaint(state, 0.5, 0.5);
+  const indexed = createSpatialPaintSampler(state)(0.5, 0.5);
+  const expected = mixPaint(recipe);
+
+  assert.deepEqual(direct.weights, recipe);
+  assert.deepEqual(indexed.weights, recipe);
+  assert.deepEqual(direct.recipe, recipe);
+  assert.deepEqual(direct.pigmentRatio, {
+    red: 0.2,
+    blue: 0.1,
+    yellow: 0.3,
+    white: 0.4,
+  });
+  assert.ok(Math.abs(direct.waterRatio - 1 / 3) < 0.0001);
+  assert.equal(direct.mixed.hex, expected.hex);
+  assert.equal(direct.mixed.waterRatio, expected.waterRatio);
+});
+
+test("保存レシピ色も通常の絵の具と同じように外から置いた水で広がる", () => {
+  const regularState = {
+    recipe: { red: 1, blue: 0, yellow: 0, white: 0, water: 1 },
+    steps: [
+      step("regular-red", "red", 0.5, 0.5),
+      step("water", "water", 0.5, 0.5),
+    ],
+    mixGestures: [],
+  };
+  const compoundState = {
+    ...regularState,
+    steps: [
+      {
+        ...step("recipe-red", "red", 0.5, 0.5),
+        recipe: { red: 1, blue: 0, yellow: 0, white: 0, water: 0 },
+      },
+      step("water", "water", 0.5, 0.5),
+    ],
+  };
+
+  const regularEdge = sampleSpatialPaint(regularState, 0.575, 0.5);
+  const compoundEdge = sampleSpatialPaint(compoundState, 0.575, 0.5);
+
+  assert.ok(regularEdge.weights.red > 0);
+  assert.ok(compoundEdge.weights.red > 0);
+  assert.ok(
+    Math.abs(regularEdge.weights.red - compoundEdge.weights.red) < 1e-10,
+  );
+  assert.ok(
+    Math.abs(regularEdge.waterRatio - compoundEdge.waterRatio) < 1e-10,
+  );
+});
+
+test("水入り保存レシピは同じ配合を別々に置いた時と中心・縁で一致する", () => {
+  const recipe = { red: 1, blue: 0, yellow: 0, white: 0, water: 1 };
+  const regularState = {
+    recipe,
+    steps: [
+      step("regular-red", "red", 0.5, 0.5),
+      step("regular-water", "water", 0.5, 0.5),
+    ],
+    mixGestures: [],
+  };
+  const compoundState = {
+    recipe,
+    steps: [
+      {
+        ...step("wet-recipe", "red", 0.5, 0.5),
+        recipe: { ...recipe },
+      },
+    ],
+    mixGestures: [],
+  };
+
+  for (const point of [
+    { x: 0.5, y: 0.5 },
+    { x: 0.575, y: 0.5 },
+  ]) {
+    const regular = sampleSpatialPaint(regularState, point.x, point.y);
+    const compound = sampleSpatialPaint(compoundState, point.x, point.y);
+    assert.ok(Math.abs(regular.weights.red - compound.weights.red) < 1e-10);
+    assert.ok(
+      Math.abs(regular.weights.water - compound.weights.water) < 1e-10,
+    );
+    assert.ok(Math.abs(regular.waterRatio - compound.waterRatio) < 1e-10);
+    assert.equal(regular.mixed.hex, compound.mixed.hex);
+  }
 });
 
 test("水は重なった地点だけの水分比率と透明度へ反映される", () => {

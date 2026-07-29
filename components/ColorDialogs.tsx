@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Beaker,
   Brush,
   Copy,
   Heart,
@@ -194,6 +195,7 @@ type ColorDetailDialogProps = {
   onDuplicate: (color: SavedColor) => void;
   onDelete: (id: string) => void;
   onReopen: (color: SavedColor) => void;
+  onUseInMixer: (color: SavedColor) => void;
   onUse: (color: SavedColor, mode: AppMode) => void;
 };
 
@@ -204,6 +206,7 @@ export function ColorDetailDialog({
   onDuplicate,
   onDelete,
   onReopen,
+  onUseInMixer,
   onUse,
 }: ColorDetailDialogProps) {
   const [editing, setEditing] = useState(false);
@@ -350,6 +353,10 @@ export function ColorDetailDialog({
         {color.note && <p className="color-detail__note">{color.note}</p>}
 
         <div className="dialog-actions-grid">
+          <button type="button" onClick={() => onUseInMixer(color)}>
+            <Beaker size={17} aria-hidden="true" />
+            混色材料にする
+          </button>
           <button type="button" onClick={() => onReopen(color)}>
             <RotateCcw size={17} aria-hidden="true" />
             もう一度つくる
