@@ -483,6 +483,18 @@ button:disabled {
   touch-action: none;
 }
 
+.paint-surface-shell {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 350px;
+}
+
+.paint-surface-shell .paint-surface {
+  min-height: 0;
+  width: 100%;
+}
+
 .paint-surface.is-sampling {
   cursor: crosshair;
 }
@@ -3163,8 +3175,11 @@ button:disabled {
   }
 
   .paint-surface {
-    min-height: 305px;
     border-radius: 15px 15px 19px 17px;
+  }
+
+  .paint-surface-shell {
+    min-height: 305px;
   }
 
   .canvas-size-switcher {

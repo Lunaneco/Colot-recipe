@@ -1209,8 +1209,11 @@ export default function ColorRecipeApp() {
               );
             } else {
               showToast(
-                `「${color.name}」を選びました。もう一度押すと詳細を開きます`,
+                compactLayout
+                  ? `「${color.name}」を選びました。詳しく見るにはパレットを開いて同じ色を押します`
+                  : `「${color.name}」を選びました。もう一度押すと詳細を開きます`,
               );
+              if (compactLayout) setPaletteOpen(false);
             }
           }}
           onOpenDetails={(color) => {
