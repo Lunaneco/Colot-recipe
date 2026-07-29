@@ -82,6 +82,67 @@ async function touchCanvasAt(
   );
 }
 
+async function touchCanvasWithJitter(
+  page: Page,
+  canvas: Locator,
+  xRatio: number,
+  yRatio: number,
+  movement: { x: number; y: number },
+) {
+  const box = await canvas.boundingBox();
+  if (!box) throw new Error("Canvas is unavailable");
+  const start = {
+    x: box.x + box.width * xRatio,
+    y: box.y + box.height * yRatio,
+  };
+
+  if (page.context().browser()?.browserType().name() !== "chromium") {
+    await canvas.tap({
+      position: {
+        x: box.width * xRatio,
+        y: box.height * yRatio,
+      },
+    });
+    return start;
+  }
+
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [
+        {
+          ...start,
+          id: 1,
+          radiusX: 1,
+          radiusY: 1,
+          force: 1,
+        },
+      ],
+    });
+    await session.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [
+        {
+          x: start.x + movement.x,
+          y: start.y + movement.y,
+          id: 1,
+          radiusX: 1,
+          radiusY: 1,
+          force: 1,
+        },
+      ],
+    });
+    await session.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+  } finally {
+    await session.detach();
+  }
+  return start;
+}
+
 async function touchElementAt(
   locator: Locator,
   xRatio: number,
@@ -116,6 +177,40 @@ async function sourceCanvasHasPaint(canvas: Locator) {
         if (pixels[offset] > 0) return true;
       }
       return false;
+    });
+}
+
+async function sourcePaintCentroid(canvas: Locator) {
+  return canvas
+    .locator("canvas.paint-layer--source")
+    .evaluate((element) => {
+      const source = element as HTMLCanvasElement;
+      const context = source.getContext("2d", { willReadFrequently: true });
+      if (!context) throw new Error("2D canvas context is unavailable");
+      const pixels = context.getImageData(
+        0,
+        0,
+        source.width,
+        source.height,
+      ).data;
+      let alphaTotal = 0;
+      let weightedX = 0;
+      let weightedY = 0;
+      for (let y = 0; y < source.height; y += 1) {
+        for (let x = 0; x < source.width; x += 1) {
+          const alpha = pixels[(y * source.width + x) * 4 + 3];
+          if (alpha === 0) continue;
+          alphaTotal += alpha;
+          weightedX += (x + 0.5) * alpha;
+          weightedY += (y + 0.5) * alpha;
+        }
+      }
+      if (alphaTotal === 0) return undefined;
+      const rect = source.getBoundingClientRect();
+      return {
+        x: rect.left + (weightedX / alphaTotal / source.width) * rect.width,
+        y: rect.top + (weightedY / alphaTotal / source.height) * rect.height,
+      };
     });
 }
 
@@ -227,6 +322,37 @@ test.describe("スマホ実タッチの回帰", () => {
     expect(deviceProfile.mobileUserAgent).toBe(true);
   });
 
+  test("微小な指ずれがあっても、タップ地点が絵の具の中心になる", async ({
+    page,
+  }) => {
+    const canvas = page.getByTestId("mix-canvas");
+    const target = { x: 0.34, y: 0.47 };
+
+    await touchElement(page, page.getByTestId("material-red"));
+    const touchStart = await touchCanvasWithJitter(
+      page,
+      canvas,
+      target.x,
+      target.y,
+      {
+        x: 4,
+        y: 0,
+      },
+    );
+
+    await expect
+      .poll(async () => {
+        const centroid = await sourcePaintCentroid(canvas);
+        return centroid
+          ? Math.hypot(
+              centroid.x - touchStart.x,
+              centroid.y - touchStart.y,
+            )
+          : Number.POSITIVE_INFINITY;
+      })
+      .toBeLessThanOrEqual(2);
+  });
+
   test("おえかきとぬりえで保存色を実タッチ選択してすぐ使える", async ({
     page,
   }) => {
@@ -271,7 +397,7 @@ test.describe("スマホ実タッチの回帰", () => {
     const drawingLayer = drawingCanvas.locator("canvas");
     await expect(drawingLayer).toHaveCount(1);
     await touchCanvasAt(page, drawingCanvas, 0.5, 0.5);
-    await expectPixelRgbNear(drawingLayer, 500, 350, [230, 95, 102]);
+    await expectPixelRgbNear(drawingLayer, 500, 350, [230, 0, 18]);
     await expect
       .poll(async () => (await pixelAt(drawingLayer, 500, 350))[3])
       .toBeGreaterThan(250);
@@ -296,7 +422,7 @@ test.describe("スマホ実タッチの回帰", () => {
     const coloringCanvas = page.getByTestId("coloring-canvas");
     const fillCanvas = coloringCanvas.locator("canvas.coloring-layer--fill");
     await touchCanvasAt(page, coloringCanvas, 0.5, 0.29);
-    await expectPixelRgbNear(fillCanvas, 460, 210, [70, 119, 203]);
+    await expectPixelRgbNear(fillCanvas, 460, 210, [0, 161, 233]);
     await expect
       .poll(async () => (await pixelAt(fillCanvas, 460, 210))[3])
       .toBeGreaterThan(240);

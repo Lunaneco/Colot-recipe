@@ -7,11 +7,109 @@ import {
   mixPaint,
   mixPaintProportions,
 } from "../lib/colorScience.ts";
+import { MATERIAL_COLORS, MATERIAL_LABELS } from "../lib/types.ts";
 
 test("顔料は31波長のスペクトル反射率として定義される", () => {
   for (const spectrum of Object.values(PIGMENT_REFLECTANCE)) {
     assert.equal(spectrum.length, 31);
     assert.ok(spectrum.every((sample) => sample > 0 && sample < 1));
+  }
+});
+
+test("最初の赤・青・黄は指定された基準色と一致する", () => {
+  const expected = {
+    red: "#E60012",
+    blue: "#00A1E9",
+    yellow: "#FFF100",
+  };
+
+  assert.deepEqual(
+    {
+      red: mixPaint({ red: 1 }).hex,
+      blue: mixPaint({ blue: 1 }).hex,
+      yellow: mixPaint({ yellow: 1 }).hex,
+    },
+    expected,
+  );
+  assert.deepEqual(
+    {
+      red: mixPaintProportions({ red: 0.25 }).hex,
+      blue: mixPaintProportions({ blue: 0.25 }).hex,
+      yellow: mixPaintProportions({ yellow: 0.25 }).hex,
+    },
+    expected,
+  );
+  assert.deepEqual(
+    {
+      red: MATERIAL_COLORS.red,
+      blue: MATERIAL_COLORS.blue,
+      yellow: MATERIAL_COLORS.yellow,
+    },
+    expected,
+  );
+  assert.deepEqual(
+    {
+      red: mixPaint({ red: 1, water: 5 }).hex,
+      blue: mixPaint({ blue: 1, water: 5 }).hex,
+      yellow: mixPaint({ yellow: 1, water: 5 }).hex,
+    },
+    expected,
+  );
+  assert.deepEqual(
+    {
+      red: MATERIAL_LABELS.red,
+      blue: MATERIAL_LABELS.blue,
+      yellow: MATERIAL_LABELS.yellow,
+    },
+    {
+      red: "赤",
+      blue: "青",
+      yellow: "黄",
+    },
+  );
+});
+
+test("基準色へ固定しても、ごく少量の別色で不連続に変化しない", () => {
+  const cases = [
+    ["red", "yellow"],
+    ["blue", "red"],
+    ["yellow", "blue"],
+  ];
+
+  for (const [primary, trace] of cases) {
+    const pure = mixPaintProportions({ [primary]: 1 });
+    const nearPure = mixPaintProportions({
+      [primary]: 1,
+      [trace]: 0.001,
+    });
+    const largestChannelJump = Math.max(
+      Math.abs(pure.rgb.r - nearPure.rgb.r),
+      Math.abs(pure.rgb.g - nearPure.rgb.g),
+      Math.abs(pure.rgb.b - nearPure.rgb.b),
+    );
+
+    assert.ok(
+      largestChannelJump <= 2,
+      `${primary}: ${pure.hex} -> ${nearPure.hex}`,
+    );
+
+    const justBelowAnchor = mixPaintProportions({
+      [primary]: 4,
+      [trace]: 1.0001,
+    });
+    const justAboveAnchor = mixPaintProportions({
+      [primary]: 4,
+      [trace]: 0.9999,
+    });
+    const anchorBoundaryJump = Math.max(
+      Math.abs(justBelowAnchor.rgb.r - justAboveAnchor.rgb.r),
+      Math.abs(justBelowAnchor.rgb.g - justAboveAnchor.rgb.g),
+      Math.abs(justBelowAnchor.rgb.b - justAboveAnchor.rgb.b),
+    );
+    assert.ok(
+      anchorBoundaryJump <= 1,
+      `${primary} anchor: ${justBelowAnchor.hex} -> ${justAboveAnchor.hex}`,
+    );
   }
 });
 

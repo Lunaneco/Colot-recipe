@@ -867,6 +867,10 @@ export function MixingStudio({
   const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
     if (activePointerId.current !== event.pointerId) return;
     const point = toNormalizedPoint(event);
+    // A finger can drift a few pixels before pointerup without becoming a
+    // drag. Keep a tap anchored to its first contact so the dab is centred
+    // exactly where the user touched.
+    const tapPoint = pointerPath.current[0] ?? point;
     const path = [...pointerPath.current, point];
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
@@ -880,11 +884,11 @@ export function MixingStudio({
       pendingSamplePoint.current = undefined;
       captureSampleAt({ x: point.x, y: point.y });
     } else if (selectedRecipeColor) {
-      onAddRecipe(selectedRecipeColor, size, point.x, point.y);
+      onAddRecipe(selectedRecipeColor, size, tapPoint.x, tapPoint.y);
     } else if (!dragging.current) {
-      if (isEraser) onErase(point.x, point.y);
+      if (isEraser) onErase(tapPoint.x, tapPoint.y);
       else if (isMaterialTool(selectedMaterial)) {
-        onAdd(selectedMaterial, size, point.x, point.y);
+        onAdd(selectedMaterial, size, tapPoint.x, tapPoint.y);
       }
     } else if (isWater) {
       const added = onAddStroke(

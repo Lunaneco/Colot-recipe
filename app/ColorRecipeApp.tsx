@@ -120,6 +120,11 @@ const MIXER_TOOL_IDS: MixerTool[] = [
 ];
 const MAX_COLOR_IMPORT_BYTES = 8 * 1024 * 1024;
 const MAX_BACKUP_IMPORT_BYTES = 64 * 1024 * 1024;
+const MATERIAL_COLOR_STYLE = {
+  "--material-red": MATERIAL_REGISTRY.red.color,
+  "--material-blue": MATERIAL_REGISTRY.blue.color,
+  "--material-yellow": MATERIAL_REGISTRY.yellow.color,
+} as React.CSSProperties;
 
 const MIXER_SHORTCUTS = {
   ...Object.fromEntries(
@@ -991,6 +996,7 @@ export default function ColorRecipeApp() {
     <div
       className="color-recipe-app"
       data-app-ready={hydrated ? "true" : "false"}
+      style={MATERIAL_COLOR_STYLE}
     >
       <header className="app-header">
         <a className="brand" href="#main" aria-label="カラーレシピ ホーム">
