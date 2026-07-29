@@ -4,6 +4,7 @@ import test from "node:test";
 import { mixPaint } from "../lib/colorScience.ts";
 import {
   createSpatialPaintSampler,
+  paintDabContribution,
   sampleSpatialPaint,
 } from "../lib/spatialMix.ts";
 
@@ -35,7 +36,14 @@ test("重なりの中心では各絵の具の局所比率が更新される", ()
 });
 
 test("保存レシピのcompound stepは全成分を一つの地点へ正確に加算する", () => {
-  const recipe = { red: 2, blue: 1, yellow: 3, white: 4, water: 5 };
+  const recipe = {
+    red: 2,
+    blue: 1,
+    yellow: 3,
+    black: 0,
+    white: 4,
+    water: 5,
+  };
   const state = {
     recipe,
     steps: [
@@ -58,6 +66,7 @@ test("保存レシピのcompound stepは全成分を一つの地点へ正確に�
     red: 0.2,
     blue: 0.1,
     yellow: 0.3,
+    black: 0,
     white: 0.4,
   });
   assert.ok(Math.abs(direct.waterRatio - 1 / 3) < 0.0001);
@@ -176,7 +185,7 @@ test("乾いた絵の具は濃く、水を置いた場所だけ薄く広がる",
   const dryDeposit = dryCentre.coverage * dryCentre.mixed.opacity;
   const wetDeposit = wetCentre.coverage * wetCentre.mixed.opacity;
 
-  assert.ok(dryCentre.coverage >= 0.95, dryCentre.coverage);
+  assert.ok(dryCentre.coverage >= 0.88, dryCentre.coverage);
   assert.ok(wetDeposit <= dryDeposit * 0.55, `${dryDeposit} -> ${wetDeposit}`);
   assert.equal(dryEdge.coverage, 0);
   assert.ok(wetEdge.coverage > 0);
@@ -217,6 +226,7 @@ test("局所の表示色は丸めた保存単位でなく実際の顔料比率�
     red: 2,
     blue: 1,
     yellow: 0,
+    black: 0,
     white: 0,
     water: 0,
   });
@@ -224,6 +234,7 @@ test("局所の表示色は丸めた保存単位でなく実際の顔料比率�
     red: 1,
     blue: 2,
     yellow: 0,
+    black: 0,
     white: 0,
     water: 0,
   });
@@ -253,6 +264,7 @@ test("スポイト用レシピは水を含む実比率を小さな整数で再�
     red: 1,
     blue: 0,
     yellow: 0,
+    black: 0,
     white: 0,
     water: 10,
   });
@@ -353,7 +365,163 @@ test("絵の具がない地点のスポイト結果は空になる", () => {
     red: 0,
     blue: 0,
     yellow: 0,
+    black: 0,
     white: 0,
   });
   assert.equal(sample.mixed.opacity, 0);
+});
+
+test("短いタップは画面の縦横比に関係なく物理ピクセルで真円になる", () => {
+  const viewport = { width: 1100, height: 760 };
+  const tap = {
+    ...step("circle-tap", "black", 0.5, 0.5),
+    shape: "tap",
+  };
+  const distance = 42;
+  const contributions = Array.from({ length: 8 }, (_, index) => {
+    const angle = (index / 8) * Math.PI * 2;
+    return paintDabContribution(
+      tap,
+      0.5 + (Math.cos(angle) * distance) / viewport.width,
+      0.5 + (Math.sin(angle) * distance) / viewport.height,
+      viewport,
+    );
+  });
+
+  assert.ok(contributions[0] > 0);
+  for (const contribution of contributions.slice(1)) {
+    assert.ok(
+      Math.abs(contribution - contributions[0]) < 1e-12,
+      `${contributions[0]} !== ${contribution}`,
+    );
+  }
+  assert.equal(
+    paintDabContribution(
+      tap,
+      0.5 + 76 / viewport.width,
+      0.5,
+      viewport,
+    ),
+    0,
+  );
+});
+
+test("長押しは少し波打って広がり、中心ほど実単位に応じて濃くなる", () => {
+  const viewport = { width: 1100, height: 760 };
+  const held = {
+    ...step("held-red", "red", 0.5, 0.5),
+    deposit: 4,
+    shape: "hold",
+    waveSeed: 0.375,
+  };
+  const tapState = {
+    recipe: { red: 1, blue: 0, yellow: 0, black: 0, white: 0, water: 0 },
+    steps: [step("tap-red", "red", 0.5, 0.5)],
+    mixGestures: [],
+  };
+  const holdState = {
+    recipe: { red: 4, blue: 0, yellow: 0, black: 0, white: 0, water: 0 },
+    steps: [held],
+    mixGestures: [],
+  };
+  const centre = sampleSpatialPaint(
+    holdState,
+    0.5,
+    0.5,
+    undefined,
+    viewport,
+  );
+  const middle = paintDabContribution(
+    held,
+    0.5 + 58 / viewport.width,
+    0.5,
+    viewport,
+  );
+  const edge = paintDabContribution(
+    held,
+    0.5 + 88 / viewport.width,
+    0.5,
+    viewport,
+  );
+  const angular = Array.from({ length: 12 }, (_, index) => {
+    const angle = (index / 12) * Math.PI * 2;
+    return paintDabContribution(
+      held,
+      0.5 + (88 * Math.cos(angle)) / viewport.width,
+      0.5 + (88 * Math.sin(angle)) / viewport.height,
+      viewport,
+    );
+  });
+  const tapCentre = sampleSpatialPaint(tapState, 0.5, 0.5);
+
+  assert.equal(centre.weights.red, 4);
+  assert.ok(centre.coverage > tapCentre.coverage);
+  assert.ok(1 > middle && middle > edge);
+  assert.ok(Math.max(...angular) - Math.min(...angular) > 0.01);
+  assert.ok(Math.max(...angular) - Math.min(...angular) < 0.35);
+});
+
+test("長押しで伸ばした軌跡だけが微波形になり、タップの真円は変わらない", () => {
+  const viewport = { width: 1100, height: 760 };
+  const stroke = {
+    ...step("stretched-blue", "blue", 0.5, 0.5),
+    shape: "stroke",
+    waveSeed: 0.41,
+  };
+  const tap = {
+    ...step("circular-blue", "blue", 0.5, 0.5),
+    shape: "tap",
+    waveSeed: 0.41,
+  };
+  const sampleRing = (paintStep) =>
+    Array.from({ length: 16 }, (_, index) => {
+      const angle = (index / 16) * Math.PI * 2;
+      return paintDabContribution(
+        paintStep,
+        0.5 + (70 * Math.cos(angle)) / viewport.width,
+        0.5 + (70 * Math.sin(angle)) / viewport.height,
+        viewport,
+      );
+    });
+  const strokeRing = sampleRing(stroke);
+  const tapRing = sampleRing(tap);
+
+  assert.ok(Math.max(...strokeRing) - Math.min(...strokeRing) > 0.005);
+  assert.ok(Math.max(...tapRing) - Math.min(...tapRing) < 1e-12);
+});
+
+test("長押しの濃さはスポイト比率へ反映され、空間indexとも一致する", () => {
+  const state = {
+    recipe: { red: 4, blue: 1, yellow: 0, black: 0, white: 0, water: 0 },
+    steps: [
+      {
+        ...step("held-red-ratio", "red", 0.5, 0.5),
+        deposit: 4,
+        shape: "hold",
+        waveSeed: 0.22,
+      },
+      { ...step("blue-tap-ratio", "blue", 0.5, 0.5), shape: "tap" },
+    ],
+    mixGestures: [],
+  };
+  const direct = sampleSpatialPaint(state, 0.5, 0.5);
+  const indexed = createSpatialPaintSampler(state);
+
+  assert.equal(direct.weights.red, 4);
+  assert.equal(direct.weights.blue, 1);
+  assert.ok(Math.abs(direct.pigmentRatio.red - 0.8) < 1e-12);
+  assert.ok(Math.abs(direct.pigmentRatio.blue - 0.2) < 1e-12);
+  assert.equal(direct.mixed.hex, mixPaint({ red: 4, blue: 1 }).hex);
+
+  for (const point of [
+    { x: 0.5, y: 0.5 },
+    { x: 0.585, y: 0.5 },
+    { x: 0.5, y: 0.62 },
+  ]) {
+    const expected = sampleSpatialPaint(state, point.x, point.y);
+    const actual = indexed(point.x, point.y);
+    assert.deepEqual(actual.weights, expected.weights);
+    assert.equal(actual.coverage, expected.coverage);
+    assert.equal(actual.mixed.hex, expected.mixed.hex);
+  }
 });

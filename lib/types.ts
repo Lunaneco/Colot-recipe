@@ -24,6 +24,12 @@ export const MATERIAL_REGISTRY = {
     shortcut: "Y",
     role: "pigment",
   },
+  black: {
+    label: "黒",
+    color: "#000000",
+    shortcut: "K",
+    role: "pigment",
+  },
   white: {
     label: "白",
     color: "#f8f3e8",
@@ -63,6 +69,8 @@ export type PaintSize = "small" | "medium" | "large";
 
 export type RecipeUnits = Record<MaterialId, number>;
 
+export type PaintShape = "tap" | "hold" | "stroke";
+
 export type PaintStep = {
   id: string;
   material: MaterialId;
@@ -71,6 +79,18 @@ export type PaintStep = {
    * exactly one unit of `material`, preserving all legacy paint steps.
    */
   recipe?: RecipeUnits;
+  /**
+   * Number of recipe batches deposited at this point. A short tap omits this
+   * field and remains exactly one unit; a long press stores its accumulated
+   * load as one undoable action.
+   */
+  deposit?: number;
+  /**
+   * Geometry of the placement. Missing legacy values behave as circular taps.
+   */
+  shape?: PaintShape;
+  /** Stable 0–1 phase used to redraw a held paint edge deterministically. */
+  waveSeed?: number;
   size: PaintSize;
   x: number;
   y: number;

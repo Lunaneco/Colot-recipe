@@ -73,7 +73,7 @@ async function expectPaintedMixer(page: Page, canvas: Locator) {
   await expect(page.getByRole("button", { name: "まっさらに" })).toBeEnabled();
   await expect(page.getByTestId("mix-all")).toBeEnabled();
   await expect(canvas.locator(".canvas-onboarding")).toHaveCount(0);
-  await expect(canvas.locator(".canvas-gesture-hint")).toBeVisible();
+  await expect(canvas.locator(".canvas-gesture-hint")).toHaveCount(0);
   await expect.poll(() => sourceCanvasHasPaint(canvas)).toBe(true);
 }
 
@@ -275,6 +275,7 @@ test("保存上限へ達した後は通常絵の具でも安全に超過させ�
   if (!box) throw new Error("Mixing canvas is unavailable");
   await page.mouse.move(box.x + box.width * 0.3, box.y + box.height * 0.58);
   await page.mouse.down();
+  await page.waitForTimeout(430);
   await page.mouse.move(
     box.x + box.width * 0.7,
     box.y + box.height * 0.58,
@@ -282,7 +283,7 @@ test("保存上限へ達した後は通常絵の具でも安全に超過させ�
   );
   await page.mouse.up();
   await expect(page.getByTestId("recipe-water")).toHaveCount(0);
-  await expect(page.getByText(/このなぞり量では配合の保存上限を超える/))
+  await expect(page.getByText(/この長さでは配合の保存上限を超える/))
     .toBeVisible();
 });
 

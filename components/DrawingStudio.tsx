@@ -244,7 +244,7 @@ export function DrawingStudio({
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [layers, setLayers] = useState<DrawingLayer[]>([newLayer(1)]);
   const [activeLayerId, setActiveLayerId] = useState<string>();
-  const [background, setBackground] = useState("#fffdf8");
+  const [background, setBackground] = useState("#ffffff");
   const [canvasSize, setCanvasSize] = useState({ width: 1000, height: 700 });
   const [saveState, setSaveState] = useState<
     "saved" | "saving" | "error"

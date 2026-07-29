@@ -81,7 +81,7 @@ export function RecipeInspector({
               ? displayMixed.hex
               : waterAmount > 0
                 ? "#d8eef1"
-                : "#eee8dc",
+                : "#eef1f4",
             opacity: hasPigment
               ? sampled
                 ? displayMixed.opacity

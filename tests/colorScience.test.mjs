@@ -16,11 +16,12 @@ test("顔料は31波長のスペクトル反射率として定義される", () 
   }
 });
 
-test("最初の赤・青・黄は指定された基準色と一致する", () => {
+test("最初の赤・青・黄・黒は指定された基準色と一致する", () => {
   const expected = {
     red: "#E60012",
     blue: "#00A1E9",
     yellow: "#FFF100",
+    black: "#000000",
   };
 
   assert.deepEqual(
@@ -28,6 +29,7 @@ test("最初の赤・青・黄は指定された基準色と一致する", () =>
       red: mixPaint({ red: 1 }).hex,
       blue: mixPaint({ blue: 1 }).hex,
       yellow: mixPaint({ yellow: 1 }).hex,
+      black: mixPaint({ black: 1 }).hex,
     },
     expected,
   );
@@ -36,6 +38,7 @@ test("最初の赤・青・黄は指定された基準色と一致する", () =>
       red: mixPaintProportions({ red: 0.25 }).hex,
       blue: mixPaintProportions({ blue: 0.25 }).hex,
       yellow: mixPaintProportions({ yellow: 0.25 }).hex,
+      black: mixPaintProportions({ black: 0.25 }).hex,
     },
     expected,
   );
@@ -44,6 +47,7 @@ test("最初の赤・青・黄は指定された基準色と一致する", () =>
       red: MATERIAL_COLORS.red,
       blue: MATERIAL_COLORS.blue,
       yellow: MATERIAL_COLORS.yellow,
+      black: MATERIAL_COLORS.black,
     },
     expected,
   );
@@ -52,6 +56,7 @@ test("最初の赤・青・黄は指定された基準色と一致する", () =>
       red: mixPaint({ red: 1, water: 5 }).hex,
       blue: mixPaint({ blue: 1, water: 5 }).hex,
       yellow: mixPaint({ yellow: 1, water: 5 }).hex,
+      black: mixPaint({ black: 1, water: 5 }).hex,
     },
     expected,
   );
@@ -60,11 +65,13 @@ test("最初の赤・青・黄は指定された基準色と一致する", () =>
       red: MATERIAL_LABELS.red,
       blue: MATERIAL_LABELS.blue,
       yellow: MATERIAL_LABELS.yellow,
+      black: MATERIAL_LABELS.black,
     },
     {
       red: "赤",
       blue: "青",
       yellow: "黄",
+      black: "黒",
     },
   );
 });
@@ -74,6 +81,7 @@ test("基準色へ固定しても、ごく少量の別色で不連続に変化�
     ["red", "yellow"],
     ["blue", "red"],
     ["yellow", "blue"],
+    ["black", "red"],
   ];
 
   for (const [primary, trace] of cases) {
@@ -111,6 +119,22 @@ test("基準色へ固定しても、ごく少量の別色で不連続に変化�
       `${primary} anchor: ${justBelowAnchor.hex} -> ${justAboveAnchor.hex}`,
     );
   }
+});
+
+test("黒は不透明な絵の具として働き、水では色を変えずに薄まる", () => {
+  const black = mixPaint({ black: 1 });
+  const inkWash = mixPaint({ black: 1, water: 4 });
+  const red = mixPaint({ red: 1 });
+  const darkRed = mixPaint({ red: 2, black: 1 });
+
+  assert.equal(black.hex, "#000000");
+  assert.ok(black.opacity >= 0.95, black.opacity);
+  assert.ok(black.intensity > 0.9, black.intensity);
+  assert.equal(black.name, "黒");
+  assert.equal(inkWash.hex, black.hex);
+  assert.ok(inkWash.opacity < black.opacity);
+  assert.ok(darkRed.hsl.l < red.hsl.l, `${red.hex} -> ${darkRed.hex}`);
+  assert.equal(darkRed.pigmentRatio.black, 0.3333);
 });
 
 test("赤＋黄はRGB平均ではない自然なオレンジになる", () => {
@@ -256,6 +280,7 @@ test("全体比率と水を除いた顔料比率を別々に返す", () => {
     red: 0.5,
     blue: 0,
     yellow: 0.3333,
+    black: 0,
     white: 0.1667,
   });
   assert.match(colour.hex, /^#[0-9A-F]{6}$/);

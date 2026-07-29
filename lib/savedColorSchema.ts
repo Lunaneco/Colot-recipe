@@ -4,6 +4,7 @@ import {
   type CapturedColorAppearance,
   type MaterialId,
   type MixGesture,
+  type PaintShape,
   type MixedColorSnapshot,
   type PaintSize,
   type PaintStep,
@@ -11,14 +12,16 @@ import {
   type SavedColor,
 } from "./types";
 
-export const SAVED_COLOR_SCHEMA_VERSION = 2;
+export const SAVED_COLOR_SCHEMA_VERSION = 3;
 export const MAX_IMPORTED_COLORS = 1_000;
 export const MAX_RECIPE_UNITS_PER_MATERIAL = 1_000;
 export const MAX_TOTAL_RECIPE_UNITS = 2_500;
 export const MAX_COLOR_IMPORT_JSON_CHARS = 8_000_000;
 
 const PAINT_SIZES = ["small", "medium", "large"] as const;
+const PAINT_SHAPES = ["tap", "hold", "stroke"] as const;
 const MAX_STEPS_PER_COLOR = 5_000;
+const MAX_STEP_DEPOSIT = 8;
 const MAX_GESTURES_PER_COLOR = 2_000;
 const MAX_PATH_POINTS_PER_GESTURE = 2_000;
 const MAX_ID_LENGTH = 160;
@@ -35,7 +38,7 @@ export type SavedColorImportIssue = {
 
 export type SavedColorImportResult = {
   /** `0` denotes the legacy unversioned array/object shape. */
-  version: 0 | 1 | typeof SAVED_COLOR_SCHEMA_VERSION;
+  version: 0 | 1 | 2 | typeof SAVED_COLOR_SCHEMA_VERSION;
   colors: SavedColor[];
   rejected: number;
   issues: SavedColorImportIssue[];
@@ -65,6 +68,10 @@ const isMaterialId = (value: unknown): value is MaterialId =>
 const isPaintSize = (value: unknown): value is PaintSize =>
   typeof value === "string" &&
   (PAINT_SIZES as readonly string[]).includes(value);
+
+const isPaintShape = (value: unknown): value is PaintShape =>
+  typeof value === "string" &&
+  (PAINT_SHAPES as readonly string[]).includes(value);
 
 const finiteNumber = (
   value: unknown,
@@ -195,6 +202,32 @@ const normalizeStep = (
   if (value.size !== undefined && !isPaintSize(value.size)) {
     throw new SavedColorImportError(`手順${index + 1}の量が不明です`);
   }
+  if (value.shape !== undefined && !isPaintShape(value.shape)) {
+    throw new SavedColorImportError(`手順${index + 1}の形が不明です`);
+  }
+  const deposit =
+    value.deposit === undefined
+      ? undefined
+      : finiteNumber(
+          value.deposit,
+          `手順${index + 1}の重なり量`,
+          1,
+          MAX_STEP_DEPOSIT,
+        );
+  if (deposit !== undefined && !Number.isSafeInteger(deposit)) {
+    throw new SavedColorImportError(
+      `手順${index + 1}の重なり量は整数にしてください`,
+    );
+  }
+  const waveSeed =
+    value.waveSeed === undefined
+      ? undefined
+      : finiteNumber(
+          value.waveSeed,
+          `手順${index + 1}の波形`,
+          0,
+          1,
+        );
   const recipe =
     value.recipe === undefined ? undefined : normalizeRecipe(value.recipe);
 
@@ -202,6 +235,9 @@ const normalizeStep = (
     id: identifier(value.id, `手順${index + 1}のID`, `import-step-${index}`),
     material: value.material,
     ...(recipe === undefined ? {} : { recipe }),
+    ...(deposit === undefined ? {} : { deposit }),
+    ...(value.shape === undefined ? {} : { shape: value.shape }),
+    ...(waveSeed === undefined ? {} : { waveSeed }),
     size: value.size ?? "medium",
     x: finiteNumber(value.x, `手順${index + 1}の横位置`, 0, 1),
     y: finiteNumber(value.y, `手順${index + 1}の縦位置`, 0, 1),
@@ -354,6 +390,43 @@ const normalizeCapturedAppearance = (
   };
 };
 
+const assertStepsMatchRecipe = (
+  steps: PaintStep[],
+  recipe: RecipeUnits,
+) => {
+  // Legacy colours may only contain their final recipe. When placement
+  // history exists, however, it must describe exactly the same quantities.
+  // This prevents a forged compound step plus `deposit` from bypassing the
+  // recipe limits and producing a different local eyedropper result.
+  if (steps.length === 0) return;
+
+  const aggregate = Object.fromEntries(
+    MATERIAL_IDS.map((material) => [material, 0]),
+  ) as RecipeUnits;
+  for (const step of steps) {
+    const deposit = step.deposit ?? 1;
+    for (const material of MATERIAL_IDS) {
+      const batchUnits =
+        step.recipe === undefined
+          ? step.material === material
+            ? 1
+            : 0
+          : step.recipe[material];
+      aggregate[material] += batchUnits * deposit;
+    }
+  }
+
+  if (
+    MATERIAL_IDS.some(
+      (material) => aggregate[material] !== recipe[material],
+    )
+  ) {
+    throw new SavedColorImportError(
+      "絵の具の手順合計が色の配合と一致しません",
+    );
+  }
+};
+
 /**
  * Normalizes one legacy/current SavedColor. Recipe data is authoritative:
  * all derived colour values are recalculated and never trusted from JSON.
@@ -412,6 +485,13 @@ export function normalizeSavedColor(
       }
     : calculated;
   const name = boundedString(value.name, "色名", MAX_NAME_LENGTH, mixed.name);
+  const steps = normalizeArray(
+    value.steps,
+    "絵の具の手順",
+    MAX_STEPS_PER_COLOR,
+    (entry, stepIndex) => normalizeStep(entry, stepIndex, createdAt),
+  );
+  assertStepsMatchRecipe(steps, recipe);
 
   return {
     id,
@@ -420,12 +500,7 @@ export function normalizeSavedColor(
     recipe,
     mixed,
     ...(capturedAppearance === undefined ? {} : { capturedAppearance }),
-    steps: normalizeArray(
-      value.steps,
-      "絵の具の手順",
-      MAX_STEPS_PER_COLOR,
-      (entry, stepIndex) => normalizeStep(entry, stepIndex, createdAt),
-    ),
+    steps,
     mixGestures: normalizeArray(
       value.mixGestures,
       "混ぜ方",
@@ -483,6 +558,7 @@ export function parseSavedColorsJson(
         !Number.isSafeInteger(decoded.version) ||
         (decoded.version !== 0 &&
           decoded.version !== 1 &&
+          decoded.version !== 2 &&
           decoded.version !== SAVED_COLOR_SCHEMA_VERSION)
       ) {
         throw new SavedColorImportError(

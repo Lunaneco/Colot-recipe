@@ -39,7 +39,7 @@ test("保存パレットをUndo・Redoでき、版付きレシピJSONを安全�
     version: number;
     colors: unknown[];
   };
-  expect(exported.version).toBe(2);
+  expect(exported.version).toBe(3);
   expect(exported.colors).toHaveLength(1);
 
   await page.getByTestId("palette-undo").click();
@@ -92,7 +92,7 @@ test("保存パレットをUndo・Redoでき、版付きレシピJSONを安全�
     stores: { colors: unknown[]; settings: unknown[] };
   };
   expect(backupJson.kind).toBe("color-recipe-app-backup");
-  expect(backupJson.version).toBe(1);
+  expect(backupJson.version).toBe(2);
   expect(backupJson.stores.colors).toHaveLength(2);
   expect(backupJson.stores.settings.length).toBeGreaterThan(0);
 });

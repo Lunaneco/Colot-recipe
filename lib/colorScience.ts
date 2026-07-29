@@ -136,6 +136,12 @@ export const PIGMENT_REFLECTANCE: Readonly<
       0.79 * sigmoid((wavelength - 492) / 13) +
       0.035 * gaussian(wavelength, 575, 90),
   ),
+  black: makeSpectrum(
+    (wavelength) =>
+      0.012 +
+      0.004 * gaussian(wavelength, 455, 80) +
+      0.002 * gaussian(wavelength, 650, 105),
+  ),
   white: makeSpectrum(
     (wavelength) =>
       0.89 +
@@ -149,6 +155,7 @@ const SCATTERING_POWER: Readonly<Record<PigmentKey, number>> = {
   red: 1,
   blue: 1.12,
   yellow: 1.2,
+  black: 0.72,
   white: 3.4,
 };
 
@@ -312,29 +319,29 @@ export const hexToRgb = (hex: string): RGBColor => {
   };
 };
 
-const PRIMARY_PIGMENTS = ["red", "blue", "yellow"] as const;
-const PRIMARY_ANCHOR_START = 0.8;
-const PRIMARY_ENDPOINTS = Object.fromEntries(
-  PRIMARY_PIGMENTS.map((primary) => [
-    primary,
+const DISPLAY_ANCHORED_PIGMENTS = ["red", "blue", "yellow", "black"] as const;
+const ENDPOINT_ANCHOR_START = 0.8;
+const DISPLAY_ENDPOINTS = Object.fromEntries(
+  DISPLAY_ANCHORED_PIGMENTS.map((pigment) => [
+    pigment,
     {
-      spectral: spectrumToRgb(PIGMENT_REFLECTANCE[primary]),
-      target: hexToRgb(MATERIAL_COLORS[primary]),
+      spectral: spectrumToRgb(PIGMENT_REFLECTANCE[pigment]),
+      target: hexToRgb(MATERIAL_COLORS[pigment]),
     },
   ]),
 ) as Record<
-  (typeof PRIMARY_PIGMENTS)[number],
+  (typeof DISPLAY_ANCHORED_PIGMENTS)[number],
   { spectral: RGBColor; target: RGBColor }
 >;
 
 /**
- * Keep the three unmixed starting colours exact without replacing the
+ * Keep the unmixed starting colours exact without replacing the
  * subtractive spectra that make mixed paint look natural. The correction
  * eases smoothly to zero before another pigment reaches one fifth of the
  * pigment load, so overlap colours remain continuous and balanced recipes
  * retain their physical spectral result.
  */
-const anchorPrimaryEndpoint = (
+const anchorDisplayEndpoint = (
   recipe: Required<PaintRecipe>,
   spectralRgb: RGBColor,
 ): RGBColor => {
@@ -344,18 +351,18 @@ const anchorPrimaryEndpoint = (
   );
   if (pigmentUnits === 0) return spectralRgb;
 
-  const primary = PRIMARY_PIGMENTS.reduce((dominant, candidate) =>
+  const pigment = DISPLAY_ANCHORED_PIGMENTS.reduce((dominant, candidate) =>
     recipe[candidate] > recipe[dominant] ? candidate : dominant,
   );
-  const primaryShare = recipe[primary] / pigmentUnits;
+  const pigmentShare = recipe[pigment] / pigmentUnits;
   const progress = clamp(
-    (primaryShare - PRIMARY_ANCHOR_START) / (1 - PRIMARY_ANCHOR_START),
+    (pigmentShare - ENDPOINT_ANCHOR_START) / (1 - ENDPOINT_ANCHOR_START),
   );
   if (progress === 0) return spectralRgb;
 
   const weight = progress * progress * (3 - 2 * progress);
   const { spectral: spectralEndpoint, target: targetEndpoint } =
-    PRIMARY_ENDPOINTS[primary];
+    DISPLAY_ENDPOINTS[pigment];
   return {
     r: Math.round(
       clamp(
@@ -426,18 +433,37 @@ const suggestJapaneseName = (
   hsl: HSLColor,
   waterRatio: number,
 ): string => {
-  const { red, blue, yellow, white } = recipe;
-  const coloured = red + blue + yellow;
+  const { red, blue, yellow, black, white } = recipe;
+  const chromatic = red + blue + yellow;
+  const coloured = chromatic + black;
 
   if (coloured + white === 0) return "透明な水";
   if (coloured === 0) return "雪の白";
 
-  const hasRedYellow = red > 0 && yellow > 0 && blue === 0;
-  const hasYellowBlue = yellow > 0 && blue > 0 && red === 0;
-  const hasRedBlue = red > 0 && blue > 0 && yellow === 0;
+  if (black > 0 && chromatic === 0 && white === 0) {
+    return waterRatio > 0.35 ? "水墨の黒" : "黒";
+  }
+  if (black > 0 && chromatic === 0 && white > 0) {
+    const blackShare = black / (black + white);
+    return blackShare > 0.65
+      ? "炭の灰"
+      : blackShare > 0.3
+        ? "やわらかな灰色"
+        : "銀鼠";
+  }
+
+  const hasRedYellow =
+    red > 0 && yellow > 0 && blue === 0 && black === 0;
+  const hasYellowBlue =
+    yellow > 0 && blue > 0 && red === 0 && black === 0;
+  const hasRedBlue =
+    red > 0 && blue > 0 && yellow === 0 && black === 0;
   const hasAllPrimaries = red > 0 && blue > 0 && yellow > 0;
   const whiteShare = white / (coloured + white);
 
+  if (black / (coloured + white) > 0.42) {
+    return hsl.l < 20 ? "墨を重ねた色" : "深い煤色";
+  }
   if (hasAllPrimaries && hsl.s < 38) {
     return hsl.l < 30 ? "深い土の色" : "静かなアースカラー";
   }
@@ -455,15 +481,15 @@ const suggestJapaneseName = (
     if (whiteShare > 0.25) return "藤色ミルク";
     return "薄明の紫";
   }
-  if (red > 0 && blue === 0 && yellow === 0) {
+  if (red > 0 && blue === 0 && yellow === 0 && black === 0) {
     if (whiteShare > 0.2) return "ミルクいちご";
     return waterRatio > 0.35 ? "花びらの赤" : "茜色";
   }
-  if (blue > 0 && red === 0 && yellow === 0) {
+  if (blue > 0 && red === 0 && yellow === 0 && black === 0) {
     if (whiteShare > 0.2) return "朝もやの青";
     return waterRatio > 0.35 ? "雨上がりの青" : "深海の青";
   }
-  if (yellow > 0 && red === 0 && blue === 0) {
+  if (yellow > 0 && red === 0 && blue === 0 && black === 0) {
     if (whiteShare > 0.2) return "バニライエロー";
     return waterRatio > 0.35 ? "木漏れ日の黄" : "ひまわり色";
   }
@@ -502,12 +528,13 @@ function calculateMixedPaint(
     ]),
   ) as Record<PigmentKey, number>;
 
-  const rgb = anchorPrimaryEndpoint(
+  const rgb = anchorDisplayEndpoint(
     recipe,
     spectrumToRgb(mixReflectance(recipe)),
   );
   const hsl = rgbToHsl(rgb);
-  const colouredUnits = recipe.red + recipe.blue + recipe.yellow;
+  const chromaticUnits = recipe.red + recipe.blue + recipe.yellow;
+  const colouredUnits = chromaticUnits + recipe.black;
 
   if (pigmentUnits === 0) {
     return {
@@ -530,15 +557,18 @@ function calculateMixedPaint(
 
   const concentration =
     pigmentUnits / (pigmentUnits + recipe.water * 1.45);
-  const opticalLoad = colouredUnits * 1.05 + recipe.white * 1.55;
+  const opticalLoad =
+    chromaticUnits * 1.05 + recipe.black * 1.65 + recipe.white * 1.55;
   // One dry unit should already behave like body paint. Water then lowers the
   // pigment concentration into a translucent wash without changing its hue.
   const dryCoverage = 1 - Math.exp(-opticalLoad * 3);
   const opacity = dryCoverage * (0.03 + 0.97 * concentration ** 0.8);
   const colourShare = colouredUnits / pigmentUnits;
   const chroma = hsl.s / 100;
+  const darkness = 1 - hsl.l / 100;
+  const perceivedStrength = Math.max(Math.sqrt(chroma), darkness ** 0.78);
   const intensity =
-    (0.2 + 0.8 * Math.sqrt(chroma)) *
+    (0.2 + 0.8 * perceivedStrength) *
     colourShare ** 0.62 *
     concentration ** 0.7;
   const viscosity = concentration ** 0.82;

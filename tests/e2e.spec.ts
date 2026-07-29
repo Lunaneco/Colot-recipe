@@ -126,7 +126,7 @@ test.beforeEach(async ({ context, page }) => {
   );
 });
 
-test("最初の赤・青・黄を指定されたHEXで表示して使える", async ({
+test("最初の赤・青・黄・黒を指定されたHEXで表示して使える", async ({
   page,
 }) => {
   const appPrimaryColors = await page.locator(".color-recipe-app").evaluate(
@@ -139,6 +139,7 @@ test("最初の赤・青・黄を指定されたHEXで表示して使える", as
           .getPropertyValue("--material-yellow")
           .trim()
           .toUpperCase(),
+        black: style.getPropertyValue("--material-black").trim().toUpperCase(),
       };
     },
   );
@@ -146,6 +147,7 @@ test("最初の赤・青・黄を指定されたHEXで表示して使える", as
     red: "#E60012",
     blue: "#00A1E9",
     yellow: "#FFF100",
+    black: "#000000",
   });
 
   await page
@@ -156,6 +158,7 @@ test("最初の赤・青・黄を指定されたHEXで表示して使える", as
     ["red", "#E60012", "rgb(230, 0, 18)"],
     ["blue", "#00A1E9", "rgb(0, 161, 233)"],
     ["yellow", "#FFF100", "rgb(255, 241, 0)"],
+    ["black", "#000000", "rgb(0, 0, 0)"],
   ] as const;
 
   for (const [material, expectedHex, expectedCss] of cases) {
@@ -169,6 +172,63 @@ test("最初の赤・青・黄を指定されたHEXで表示して使える", as
     await expect(page.getByTestId("recipe-hex")).toHaveText(expectedHex);
     await page.getByRole("button", { name: "まっさらに" }).click();
   }
+});
+
+test("既存レイアウトのまま白基調と3原色アクセントで表示する", async ({
+  page,
+}) => {
+  const theme = await page.locator(".color-recipe-app").evaluate((element) => {
+    const root = getComputedStyle(element);
+    const body = getComputedStyle(document.body);
+    const header = getComputedStyle(
+      document.querySelector<HTMLElement>(".app-header")!,
+    );
+    const mixingCard = getComputedStyle(
+      document.querySelector<HTMLElement>(".mixing-card")!,
+    );
+    const paintSurface = getComputedStyle(
+      document.querySelector<HTMLElement>(".paint-surface")!,
+    );
+    return {
+      red: root.getPropertyValue("--material-red").trim().toUpperCase(),
+      blue: root.getPropertyValue("--material-blue").trim().toUpperCase(),
+      yellow: root.getPropertyValue("--material-yellow").trim().toUpperCase(),
+      bodyBackground: body.backgroundColor,
+      headerBackground: header.backgroundColor,
+      cardBackground: mixingCard.backgroundColor,
+      canvasBackground: paintSurface.backgroundColor,
+    };
+  });
+
+  expect(theme).toEqual({
+    red: "#E60012",
+    blue: "#00A1E9",
+    yellow: "#FFF100",
+    bodyBackground: "rgb(246, 247, 249)",
+    headerBackground: "rgba(255, 255, 255, 0.97)",
+    cardBackground: "rgb(255, 255, 255)",
+    canvasBackground: "rgb(255, 255, 255)",
+  });
+
+  await page.getByTestId("mode-draw").click();
+  await expect(page.getByTestId("drawing-studio")).toBeVisible();
+  await expect(page.getByTestId("drawing-canvas")).toHaveCSS(
+    "background-color",
+    "rgb(255, 255, 255)",
+  );
+
+  await page.getByTestId("mode-color").click();
+  await expect(page.getByTestId("coloring-studio")).toBeVisible();
+  await expect(page.getByTestId("coloring-canvas")).toHaveCSS(
+    "background-color",
+    "rgb(255, 255, 255)",
+  );
+  await expect
+    .poll(async () => {
+      const fill = page.locator(".coloring-layer--fill");
+      return pixelAt(fill, 8, 8);
+    })
+    .toEqual([255, 255, 255, 255]);
 });
 
 test("ヘルプからナレーション・字幕付きチュートリアルを再生できる", async ({
@@ -420,11 +480,11 @@ test("ぬりえの閉じた領域を塗り、PNGとしてダウンロードで�
 
   await expect
     .poll(() => pixelAt(fillCanvas, 0, 0))
-    .toEqual([255, 253, 248, 255]);
+    .toEqual([255, 255, 255, 255]);
 
   const centerBefore = await pixelAt(fillCanvas, 460, 210);
   const outsideBefore = await pixelAt(fillCanvas, 0, 0);
-  expect(centerBefore).toEqual([255, 253, 248, 255]);
+  expect(centerBefore).toEqual([255, 255, 255, 255]);
 
   const box = await coloringCanvas.boundingBox();
   expect(box).not.toBeNull();
@@ -489,7 +549,7 @@ test("くま・うさぎ・リボンを含む太い線画を枠ごとに塗れ�
     await expect(page.getByText(`${label}の線画を選択中`)).toBeVisible();
     await expect
       .poll(() => pixelAt(fillCanvas, x, y))
-      .toEqual([255, 253, 248, 255]);
+      .toEqual([255, 255, 255, 255]);
 
     const before = await pixelAt(fillCanvas, x, y);
     const outside = await pixelAt(fillCanvas, 20, 20);
@@ -689,7 +749,7 @@ test("読み込んだ線画ごとに進捗を分け、ブラシ設定とUndo・R
   );
   await expect
     .poll(() => pixelAt(fillCanvas, 100, 100))
-    .toEqual([255, 253, 248, 255]);
+    .toEqual([255, 255, 255, 255]);
 
   const squareBefore = await pixelAt(fillCanvas, 100, 100);
   await clickCanvasPoint(coloringCanvas, 100, 100);

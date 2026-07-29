@@ -23,7 +23,7 @@ type StoreName = "colors" | "settings" | "artworks" | "coloring";
 type KeyValueStoreName = Exclude<StoreName, "colors">;
 
 export const APP_BACKUP_KIND = "color-recipe-app-backup";
-export const APP_BACKUP_VERSION = 1;
+export const APP_BACKUP_VERSION = 2;
 export const MAX_APP_BACKUP_JSON_CHARS = 64_000_000;
 
 const MAX_BACKUP_ENTRIES_PER_STORE = 2_000;
@@ -848,7 +848,7 @@ export function parseAppBackupJson(input: string | unknown): AppBackup {
   if (decoded.kind !== APP_BACKUP_KIND) {
     throw new AppBackupError("カラーレシピの全体バックアップではありません");
   }
-  if (decoded.version !== APP_BACKUP_VERSION) {
+  if (decoded.version !== 1 && decoded.version !== APP_BACKUP_VERSION) {
     throw new AppBackupError(
       `対応していないバックアップ版です（対応版: ${APP_BACKUP_VERSION}）`,
     );
