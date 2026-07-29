@@ -72,11 +72,54 @@ test("乾いた絵の具は濃く、水を置いた場所だけ薄く広がる",
   const dryDeposit = dryCentre.coverage * dryCentre.mixed.opacity;
   const wetDeposit = wetCentre.coverage * wetCentre.mixed.opacity;
 
-  assert.ok(dryCentre.coverage >= 0.95, dryCentre.coverage);
+  assert.ok(dryCentre.coverage >= 0.9, dryCentre.coverage);
   assert.ok(wetDeposit <= dryDeposit * 0.55, `${dryDeposit} -> ${wetDeposit}`);
   assert.equal(dryEdge.coverage, 0);
   assert.ok(wetEdge.coverage > 0);
   assert.ok(wetEdge.mixed.opacity < wetCentre.mixed.opacity);
+});
+
+test("同じ場所へ絵の具を重ねると初回の濃さを保ったまま表示色が深くなる", () => {
+  const oneLayer = sampleSpatialPaint(
+    {
+      recipe: { red: 1, blue: 0, yellow: 0, white: 0, water: 0 },
+      steps: [step("red-1", "red", 0.5, 0.5)],
+      mixGestures: [],
+    },
+    0.5,
+    0.5,
+  );
+  const twoLayers = sampleSpatialPaint(
+    {
+      recipe: { red: 2, blue: 0, yellow: 0, white: 0, water: 0 },
+      steps: [
+        step("red-1", "red", 0.5, 0.5),
+        step("red-2", "red", 0.5, 0.5),
+      ],
+      mixGestures: [],
+    },
+    0.5,
+    0.5,
+  );
+  const visibleLuminance = (sample) => {
+    const alpha = sample.coverage * sample.mixed.opacity;
+    const channels = ["r", "g", "b"].map(
+      (channel) =>
+        sample.mixed.rgb[channel] * alpha + 255 * (1 - alpha),
+    );
+    return (
+      channels[0] * 0.2126 +
+      channels[1] * 0.7152 +
+      channels[2] * 0.0722
+    );
+  };
+
+  assert.ok(oneLayer.coverage >= 0.9, oneLayer.coverage);
+  assert.ok(twoLayers.coverage > oneLayer.coverage);
+  assert.ok(
+    visibleLuminance(oneLayer) - visibleLuminance(twoLayers) > 8,
+    `${visibleLuminance(oneLayer)} -> ${visibleLuminance(twoLayers)}`,
+  );
 });
 
 test("遠くの水は手混ぜ軌跡へ持ち込まれない", () => {

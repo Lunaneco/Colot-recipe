@@ -49,6 +49,9 @@ const DEFAULT_VIEWPORT: SpatialSampleViewport = {
 };
 const PROXY_PIGMENT_UNITS = 32;
 const SPATIAL_INDEX_COLUMNS = 16;
+// A single dry dab remains body-paint dense, while a second coat still has
+// enough optical headroom to become visibly deeper instead of saturating.
+const PIGMENT_COVERAGE_RATE = 2.4;
 
 const clamp = (value: number, minimum = 0, maximum = 1) =>
   Math.min(maximum, Math.max(minimum, value));
@@ -319,7 +322,9 @@ function sampleSpatialPaintFromSteps(
     recipe,
     pigmentRatio,
     waterRatio,
-    coverage: clamp(1 - Math.exp(-pigmentWeight * 3.2)),
+    coverage: clamp(
+      1 - Math.exp(-pigmentWeight * PIGMENT_COVERAGE_RATE),
+    ),
     mixed,
   };
 }
