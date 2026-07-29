@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { mixPaint } from "../lib/colorScience.ts";
 import { sampleSpatialPaint } from "../lib/spatialMix.ts";
 
 const createdAt = "2026-07-28T00:00:00.000Z";
@@ -72,53 +73,111 @@ test("乾いた絵の具は濃く、水を置いた場所だけ薄く広がる",
   const dryDeposit = dryCentre.coverage * dryCentre.mixed.opacity;
   const wetDeposit = wetCentre.coverage * wetCentre.mixed.opacity;
 
-  assert.ok(dryCentre.coverage >= 0.9, dryCentre.coverage);
+  assert.ok(dryCentre.coverage >= 0.95, dryCentre.coverage);
   assert.ok(wetDeposit <= dryDeposit * 0.55, `${dryDeposit} -> ${wetDeposit}`);
   assert.equal(dryEdge.coverage, 0);
   assert.ok(wetEdge.coverage > 0);
   assert.ok(wetEdge.mixed.opacity < wetCentre.mixed.opacity);
 });
 
-test("同じ場所へ絵の具を重ねると初回の濃さを保ったまま表示色が深くなる", () => {
-  const oneLayer = sampleSpatialPaint(
+test("局所の表示色は丸めた保存単位でなく実際の顔料比率から求める", () => {
+  const redHeavy = sampleSpatialPaint(
     {
-      recipe: { red: 1, blue: 0, yellow: 0, white: 0, water: 0 },
-      steps: [step("red-1", "red", 0.5, 0.5)],
-      mixGestures: [],
-    },
-    0.5,
-    0.5,
-  );
-  const twoLayers = sampleSpatialPaint(
-    {
-      recipe: { red: 2, blue: 0, yellow: 0, white: 0, water: 0 },
+      recipe: { red: 2, blue: 1, yellow: 0, white: 0, water: 0 },
       steps: [
         step("red-1", "red", 0.5, 0.5),
         step("red-2", "red", 0.5, 0.5),
+        step("blue-1", "blue", 0.5, 0.5),
       ],
       mixGestures: [],
     },
     0.5,
     0.5,
   );
-  const visibleLuminance = (sample) => {
-    const alpha = sample.coverage * sample.mixed.opacity;
-    const channels = ["r", "g", "b"].map(
-      (channel) =>
-        sample.mixed.rgb[channel] * alpha + 255 * (1 - alpha),
-    );
-    return (
-      channels[0] * 0.2126 +
-      channels[1] * 0.7152 +
-      channels[2] * 0.0722
-    );
-  };
+  const blueHeavy = sampleSpatialPaint(
+    {
+      recipe: { red: 1, blue: 2, yellow: 0, white: 0, water: 0 },
+      steps: [
+        step("red-1", "red", 0.5, 0.5),
+        step("blue-1", "blue", 0.5, 0.5),
+        step("blue-2", "blue", 0.5, 0.5),
+      ],
+      mixGestures: [],
+    },
+    0.5,
+    0.5,
+  );
 
-  assert.ok(oneLayer.coverage >= 0.9, oneLayer.coverage);
-  assert.ok(twoLayers.coverage > oneLayer.coverage);
+  assert.ok(Math.abs(redHeavy.pigmentRatio.red - 2 / 3) < 0.0001);
+  assert.ok(Math.abs(blueHeavy.pigmentRatio.blue - 2 / 3) < 0.0001);
+  assert.deepEqual(redHeavy.recipe, {
+    red: 2,
+    blue: 1,
+    yellow: 0,
+    white: 0,
+    water: 0,
+  });
+  assert.deepEqual(blueHeavy.recipe, {
+    red: 1,
+    blue: 2,
+    yellow: 0,
+    white: 0,
+    water: 0,
+  });
+  assert.equal(redHeavy.mixed.hex, mixPaint({ red: 2, blue: 1 }).hex);
+  assert.equal(blueHeavy.mixed.hex, mixPaint({ red: 1, blue: 2 }).hex);
+  assert.ok(redHeavy.mixed.rgb.r > blueHeavy.mixed.rgb.r);
+  assert.ok(blueHeavy.mixed.rgb.b > redHeavy.mixed.rgb.b);
+});
+
+test("スポイト用レシピは水を含む実比率を小さな整数で再現する", () => {
+  const sample = sampleSpatialPaint(
+    {
+      recipe: { red: 1, blue: 0, yellow: 0, white: 0, water: 10 },
+      steps: [
+        step("red", "red", 0.5, 0.5),
+        ...Array.from({ length: 10 }, (_, index) =>
+          step(`water-${index}`, "water", 0.5, 0.5),
+        ),
+      ],
+      mixGestures: [],
+    },
+    0.5,
+    0.5,
+  );
+
+  assert.deepEqual(sample.recipe, {
+    red: 1,
+    blue: 0,
+    yellow: 0,
+    white: 0,
+    water: 10,
+  });
+  assert.ok(Math.abs(sample.waterRatio - 10 / 11) < 0.0001);
+  assert.ok(Math.abs(sample.mixed.waterRatio - 10 / 11) < 0.001);
+});
+
+test("水の端にごく薄い顔料がある地点でも保存用レシピを空にしない", () => {
+  const sample = sampleSpatialPaint(
+    {
+      recipe: { red: 1, blue: 0, yellow: 0, white: 0, water: 1 },
+      steps: [
+        step("trace-red", "red", 0.5687, 0.5),
+        step("water", "water", 0.5, 0.5),
+      ],
+      mixGestures: [],
+    },
+    0.5,
+    0.5,
+  );
+
+  assert.ok(sample.weights.red > 0);
+  assert.ok(sample.coverage > 0.002);
+  assert.ok(sample.recipe.red >= 1);
+  assert.ok(sample.recipe.water >= 1);
   assert.ok(
-    visibleLuminance(oneLayer) - visibleLuminance(twoLayers) > 8,
-    `${visibleLuminance(oneLayer)} -> ${visibleLuminance(twoLayers)}`,
+    Object.values(sample.recipe).reduce((sum, value) => sum + value, 0) <=
+      128,
   );
 });
 

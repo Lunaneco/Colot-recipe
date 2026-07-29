@@ -1,4 +1,7 @@
-import { mixPaint, type MixedPaintColor } from "./colorScience";
+import {
+  mixPaintProportions,
+  type MixedPaintColor,
+} from "./colorScience";
 import {
   EMPTY_RECIPE,
   MATERIAL_IDS,
@@ -49,9 +52,8 @@ const DEFAULT_VIEWPORT: SpatialSampleViewport = {
 };
 const PROXY_PIGMENT_UNITS = 32;
 const SPATIAL_INDEX_COLUMNS = 16;
-// A single dry dab remains body-paint dense, while a second coat still has
-// enough optical headroom to become visibly deeper instead of saturating.
-const PIGMENT_COVERAGE_RATE = 2.4;
+const COLOUR_RATIO_SUBDIVISIONS = 64;
+const MAX_LOCAL_RECIPE_UNITS = 128;
 
 const clamp = (value: number, minimum = 0, maximum = 1) =>
   Math.min(maximum, Math.max(minimum, value));
@@ -205,6 +207,127 @@ function proxyRecipeFromWeights(
   return recipe;
 }
 
+function colourRecipeFromWeights(
+  weights: Record<MaterialId, number>,
+): Required<RecipeUnits> {
+  const pigmentWeight = PIGMENT_IDS.reduce(
+    (total, pigment) => total + weights[pigment],
+    0,
+  );
+  if (pigmentWeight <= 0) {
+    return {
+      ...EMPTY_RECIPE,
+      water: weights.water > 0 ? 1 : 0,
+    };
+  }
+
+  const scale = PROXY_PIGMENT_UNITS / pigmentWeight;
+  const quantize = (value: number) =>
+    Math.round(value * COLOUR_RATIO_SUBDIVISIONS) /
+    COLOUR_RATIO_SUBDIVISIONS;
+  return {
+    red: quantize(weights.red * scale),
+    blue: quantize(weights.blue * scale),
+    yellow: quantize(weights.yellow * scale),
+    white: quantize(weights.white * scale),
+    water: quantize(weights.water * scale),
+  };
+}
+
+function compactRecipeFromWeights(
+  weights: Record<MaterialId, number>,
+): RecipeUnits {
+  const totalWeight = MATERIAL_IDS.reduce(
+    (total, material) => total + weights[material],
+    0,
+  );
+  if (totalWeight <= 0) return { ...EMPTY_RECIPE };
+
+  const activeMaterials = MATERIAL_IDS.filter(
+    (material) => weights[material] > 1e-8,
+  );
+  const pigmentWeight = PIGMENT_IDS.reduce(
+    (total, pigment) => total + weights[pigment],
+    0,
+  );
+  const dominantPigment =
+    pigmentWeight > 0
+      ? PIGMENT_IDS.reduce((largest, pigment) =>
+          weights[pigment] > weights[largest] ? pigment : largest,
+        )
+      : undefined;
+  const requiredMaterials = new Set(
+    activeMaterials.filter(
+      (material) =>
+        weights[material] / totalWeight >=
+        0.5 / MAX_LOCAL_RECIPE_UNITS,
+    ),
+  );
+  if (dominantPigment) requiredMaterials.add(dominantPigment);
+  let bestRecipe: RecipeUnits | undefined;
+  let bestError = Number.POSITIVE_INFINITY;
+
+  for (
+    let totalUnits = activeMaterials.length;
+    totalUnits <= MAX_LOCAL_RECIPE_UNITS;
+    totalUnits += 1
+  ) {
+    const exactUnits = MATERIAL_IDS.map(
+      (material) => (weights[material] / totalWeight) * totalUnits,
+    );
+    const units = exactUnits.map(Math.floor);
+    const remaining =
+      totalUnits - units.reduce((sum, value) => sum + value, 0);
+    const remainderOrder = MATERIAL_IDS.map((_, index) => index).sort(
+      (left, right) =>
+        exactUnits[right] - units[right] -
+          (exactUnits[left] - units[left]) ||
+        left - right,
+    );
+    for (let index = 0; index < remaining; index += 1) {
+      units[remainderOrder[index]] += 1;
+    }
+
+    for (const material of requiredMaterials) {
+      const materialIndex = MATERIAL_IDS.indexOf(material);
+      if (units[materialIndex] > 0) continue;
+      const donorIndex = units.reduce(
+        (largestIndex, value, index) =>
+          value > units[largestIndex] ? index : largestIndex,
+        0,
+      );
+      if (units[donorIndex] <= 1) continue;
+      units[donorIndex] -= 1;
+      units[materialIndex] = 1;
+    }
+
+    const error = MATERIAL_IDS.reduce((sum, material, index) => {
+      const exactShare = weights[material] / totalWeight;
+      const candidateShare = units[index] / totalUnits;
+      return sum + Math.abs(exactShare - candidateShare);
+    }, 0);
+    if (error + 1e-12 < bestError) {
+      bestError = error;
+      bestRecipe = Object.fromEntries(
+        MATERIAL_IDS.map((material, index) => [material, units[index]]),
+      ) as RecipeUnits;
+      if (error <= 1e-10) break;
+    }
+  }
+
+  if (bestRecipe) return bestRecipe;
+  if (dominantPigment) {
+    return {
+      ...EMPTY_RECIPE,
+      [dominantPigment]: 1,
+    };
+  }
+  return {
+    ...EMPTY_RECIPE,
+    water: weights.water > 0 ? 1 : 0,
+  };
+}
+
 /**
  * Samples the locally overlapping paint at a normalised palette coordinate.
  * The returned ratio is spatial: moving through an overlap changes the recipe
@@ -217,7 +340,7 @@ export function sampleSpatialPaint(
   colourCache?: Map<string, MixedPaintColor>,
   requestedViewport?: SpatialSampleViewport,
 ): SpatialPaintSample {
-  return sampleSpatialPaintFromSteps(
+  const sample = sampleSpatialPaintFromSteps(
     state,
     state.steps,
     x,
@@ -225,6 +348,10 @@ export function sampleSpatialPaint(
     colourCache,
     normaliseViewport(requestedViewport),
   );
+  return {
+    ...sample,
+    recipe: compactRecipeFromWeights(sample.weights),
+  };
 }
 
 function sampleSpatialPaintFromSteps(
@@ -309,10 +436,14 @@ function sampleSpatialPaintFromSteps(
   ) as Record<PigmentId, number>;
   const waterRatio = totalWeight > 0 ? weights.water / totalWeight : 0;
   const recipe = proxyRecipeFromWeights(weights);
-  const cacheKey = MATERIAL_IDS.map((material) => recipe[material]).join(":");
+  const colourRecipe = colourRecipeFromWeights(weights);
+  const cacheKey = MATERIAL_IDS.map(
+    (material) =>
+      Math.round(colourRecipe[material] * COLOUR_RATIO_SUBDIVISIONS),
+  ).join(":");
   let mixed = colourCache?.get(cacheKey);
   if (!mixed) {
-    mixed = mixPaint(recipe);
+    mixed = mixPaintProportions(colourRecipe);
     colourCache?.set(cacheKey, mixed);
   }
 
@@ -322,9 +453,7 @@ function sampleSpatialPaintFromSteps(
     recipe,
     pigmentRatio,
     waterRatio,
-    coverage: clamp(
-      1 - Math.exp(-pigmentWeight * PIGMENT_COVERAGE_RATE),
-    ),
+    coverage: clamp(1 - Math.exp(-pigmentWeight * 3.2)),
     mixed,
   };
 }

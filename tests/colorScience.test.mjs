@@ -5,6 +5,7 @@ import {
   PIGMENT_REFLECTANCE,
   calculatePaintColor,
   mixPaint,
+  mixPaintProportions,
 } from "../lib/colorScience.ts";
 
 test("顔料は31波長のスペクトル反射率として定義される", () => {
@@ -22,6 +23,39 @@ test("赤＋黄はRGB平均ではない自然なオレンジになる", () => {
   assert.ok(orange.rgb.g > orange.rgb.b);
   assert.equal(orange.name, "夕焼けオレンジ");
   assert.notDeepEqual(orange.rgb, { r: 128, g: 128, b: 0 });
+});
+
+test("小数の局所配合でも整数レシピと同じ正確な比率色になる", () => {
+  const integerRatio = mixPaint({ red: 2, blue: 1, water: 1 });
+  const localRatio = mixPaintProportions({
+    red: 64 / 3,
+    blue: 32 / 3,
+    water: 32 / 3,
+  });
+
+  assert.equal(localRatio.hex, integerRatio.hex);
+  assert.deepEqual(localRatio.rgb, integerRatio.rgb);
+  assert.ok(Math.abs(localRatio.pigmentRatio.red - 2 / 3) < 0.0001);
+  assert.ok(Math.abs(localRatio.waterRatio - 0.25) < 0.0001);
+});
+
+test("ごく少量の青が加わっても赤黄の混色が不連続に飛ばない", () => {
+  const orange = mixPaintProportions({ red: 16, yellow: 16 });
+  const traceBlue = mixPaintProportions({
+    red: 16,
+    yellow: 16,
+    blue: 0.001,
+  });
+  const largestChannelJump = Math.max(
+    Math.abs(orange.rgb.r - traceBlue.rgb.r),
+    Math.abs(orange.rgb.g - traceBlue.rgb.g),
+    Math.abs(orange.rgb.b - traceBlue.rgb.b),
+  );
+
+  assert.ok(
+    largestChannelJump <= 2,
+    `${orange.hex} -> ${traceBlue.hex}`,
+  );
 });
 
 test("赤黄の顔料相互作用は白を含む代表配合を落ち着いた橙に補正する", () => {
