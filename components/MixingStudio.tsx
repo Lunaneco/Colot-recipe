@@ -331,8 +331,8 @@ function drawSpatialMixField(
         1,
         Math.max(
           0,
-          sampledPixel.coverage *
-            ((1 - dryBody) + bodyCoverage * dryBody) *
+          (sampledPixel.coverage * (1 - dryBody) +
+            bodyCoverage * dryBody) *
             grain,
         ),
       );

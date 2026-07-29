@@ -71,19 +71,7 @@ async function renderedScreenshotPixelAt(
   );
 }
 
-function visibleLuminanceOnWhite(pixel: number[]) {
-  const alpha = pixel[3] / 255;
-  const composite = pixel
-    .slice(0, 3)
-    .map((channel) => channel * alpha + 255 * (1 - alpha));
-  return (
-    composite[0] * 0.2126 +
-    composite[1] * 0.7152 +
-    composite[2] * 0.0722
-  );
-}
-
-test("同じ場所へ同じ絵の具を重ねると表示色が濃くなる", async ({
+test("同じ場所の顔料量が2対1なら表示色も正確な2対1混色になる", async ({
   page,
 }) => {
   await page.goto("./");
@@ -91,47 +79,87 @@ test("同じ場所へ同じ絵の具を重ねると表示色が濃くなる", as
     "data-app-ready",
     "true",
   );
-  await page.addStyleTag({
-    content:
-      ".canvas-onboarding,.canvas-gesture-hint,.sample-point-marker{display:none!important}",
-  });
   const canvas = page.getByTestId("mix-canvas");
   const source = canvas.locator("canvas.paint-layer--source");
   const point = { x: 0.5, y: 0.58 };
 
   await page.getByTestId("material-red").click();
   await clickCanvasAtRatio(canvas, point.x, point.y);
-  await expect(page.getByTestId("recipe-red")).toHaveText("1");
-  await expect
-    .poll(async () => (await sourcePixelAt(source, point.x, point.y))[3])
-    .toBeGreaterThan(0);
-  const firstLayer = await sourcePixelAt(source, point.x, point.y);
-  const firstRendered = await renderedScreenshotPixelAt(
-    page,
-    canvas,
-    point.x,
-    point.y,
-  );
-
   await clickCanvasAtRatio(canvas, point.x, point.y);
   await expect(page.getByTestId("recipe-red")).toHaveText("2");
+  await page.getByTestId("material-blue").click();
+  await clickCanvasAtRatio(canvas, point.x, point.y);
+  await expect(page.getByTestId("recipe-blue")).toHaveText("1");
+
+  // The spectral 2:1 red/blue mixture is #955D7C. The former 32-unit
+  // display proxy rounded it to 21:11 and produced #945D7C instead.
   await expect
-    .poll(async () => {
-      const secondLayer = await sourcePixelAt(source, point.x, point.y);
-      return visibleLuminanceOnWhite(firstLayer) -
-        visibleLuminanceOnWhite(secondLayer);
-    })
-    .toBeGreaterThan(8);
-  const secondRendered = await renderedScreenshotPixelAt(
-    page,
-    canvas,
-    point.x,
-    point.y,
+    .poll(async () =>
+      (await sourcePixelAt(source, point.x, point.y)).slice(0, 3),
+    )
+    .toEqual([149, 93, 124]);
+
+  await page.getByTestId("material-picker").click();
+  await clickCanvasAtRatio(canvas, point.x, point.y);
+  await expect(page.locator(".pigment-ratio strong")).toHaveText(
+    "赤 66.7%：青 33.3%",
   );
-  expect(
-    visibleLuminanceOnWhite(firstRendered) -
-      visibleLuminanceOnWhite(secondRendered),
-  ).toBeGreaterThan(6);
+
+  await page.getByTestId("open-save-color").click();
+  const saveDialog = page.getByRole("dialog", { name: "この色を登録" });
+  await expect(saveDialog.locator(".save-dialog__summary")).toContainText(
+    "赤2・青1",
+  );
+  await saveDialog.getByLabel("色の名前").fill("赤二対青一");
+  await saveDialog.getByTestId("confirm-save-color").click();
+  await page.getByTestId("saved-color-0").click();
+  await page.getByTestId("saved-color-0").click();
+  const detail = page.getByTestId("recipe-dialog");
+  await detail.getByRole("button", { name: "もう一度つくる" }).click();
+  await expect(page.getByTestId("recipe-red")).toHaveText("2");
+  await expect(page.getByTestId("recipe-blue")).toHaveText("1");
+  await page.getByRole("button", { name: "くわしい数値を見る" }).click();
+  await expect(page.getByTestId("recipe-hex")).toHaveText("#955D7C");
+});
+
+test("水の多いスポイト配合も実際の比率で保存して再現する", async ({
+  page,
+}) => {
+  await page.goto("./");
+  await expect(page.locator(".color-recipe-app")).toHaveAttribute(
+    "data-app-ready",
+    "true",
+  );
+  const canvas = page.getByTestId("mix-canvas");
+  const point = { x: 0.5, y: 0.58 };
+
+  await page.getByTestId("material-red").click();
+  await clickCanvasAtRatio(canvas, point.x, point.y);
+  await page.getByTestId("material-water").click();
+  for (let index = 0; index < 10; index += 1) {
+    await clickCanvasAtRatio(canvas, point.x, point.y);
+  }
+  await page.getByTestId("material-picker").click();
+  await clickCanvasAtRatio(canvas, point.x, point.y);
+  await expect(page.locator(".recipe-row--water .ratio-value")).toHaveText(
+    "90.9%",
+  );
+
+  await page.getByTestId("open-save-color").click();
+  const saveDialog = page.getByRole("dialog", { name: "この色を登録" });
+  await expect(saveDialog.locator(".save-dialog__summary")).toContainText(
+    "赤1・水10",
+  );
+  await saveDialog.getByLabel("色の名前").fill("水十対赤一");
+  await saveDialog.getByTestId("confirm-save-color").click();
+  await page.getByTestId("saved-color-0").click();
+  await page.getByTestId("saved-color-0").click();
+  await page
+    .getByTestId("recipe-dialog")
+    .getByRole("button", { name: "もう一度つくる" })
+    .click();
+  await expect(page.getByTestId("recipe-red")).toHaveText("1");
+  await expect(page.getByTestId("recipe-water")).toHaveText("10");
 });
 
 test("重なった場所をスポイトで調べると局所顔料比率が変わる", async ({
@@ -174,7 +202,7 @@ test("重なった場所をスポイトで調べると局所顔料比率が変�
   await page.getByTestId("open-save-color").click();
   const latestPointDialog = page.getByRole("dialog", { name: "この色を登録" });
   await expect(latestPointDialog.locator(".save-dialog__summary"))
-    .toContainText("赤32");
+    .toContainText("赤1");
   await expect(latestPointDialog.locator(".save-dialog__summary"))
     .not.toContainText("黄");
 });
@@ -369,7 +397,7 @@ test("スポイト地点の局所レシピを登録して、もう一度つく�
   const saveDialog = page.getByRole("dialog", { name: "この色を登録" });
   await expect(saveDialog.getByText("スポイト地点の色を残す")).toBeVisible();
   await expect(saveDialog.locator(".save-dialog__summary")).toContainText(
-    "赤16・黄16",
+    "赤1・黄1",
   );
   await saveDialog.getByLabel("色の名前").fill("重なりで見つけた橙");
   await saveDialog.getByTestId("confirm-save-color").click();
@@ -383,14 +411,14 @@ test("スポイト地点の局所レシピを登録して、もう一度つく�
   );
   await expect(
     detail.locator(".color-detail__recipe > div").filter({ hasText: "赤" }),
-  ).toContainText("16単位");
+  ).toContainText("1単位");
   await expect(
     detail.locator(".color-detail__recipe > div").filter({ hasText: "黄" }),
-  ).toContainText("16単位");
+  ).toContainText("1単位");
 
   await detail.getByRole("button", { name: "もう一度つくる" }).click();
-  await expect(page.getByTestId("recipe-red")).toHaveText("16");
-  await expect(page.getByTestId("recipe-yellow")).toHaveText("16");
+  await expect(page.getByTestId("recipe-red")).toHaveText("1");
+  await expect(page.getByTestId("recipe-yellow")).toHaveText("1");
 });
 
 test("スポイトが空白を示す間は登録できず、全体へ戻ると登録できる", async ({

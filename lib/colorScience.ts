@@ -181,6 +181,22 @@ export function normalizePaintRecipe(
   ) as Required<PaintRecipe>;
 }
 
+function normalizePaintProportions(
+  recipe: PaintRecipe = {},
+): Required<PaintRecipe> {
+  return Object.fromEntries(
+    MATERIAL_IDS.map((material) => {
+      const value = recipe[material] ?? 0;
+      if (!Number.isFinite(value) || value < 0) {
+        throw new RangeError(
+          `${material} proportion must be a finite non-negative number`,
+        );
+      }
+      return [material, value];
+    }),
+  ) as Required<PaintRecipe>;
+}
+
 const mixReflectance = (
   recipe: Required<PaintRecipe>,
 ): readonly number[] => {
@@ -195,12 +211,17 @@ const mixReflectance = (
   // A geometric-mean interaction term models the extra optical path where the
   // two pigments meet: it is zero for either pure endpoint, peaks for balanced
   // mixtures, and is naturally masked by titanium white.
-  const warmInteraction =
-    recipe.blue === 0
-      ? clamp(
-          (2 * Math.sqrt(recipe.red * recipe.yellow) * 1.02) / pigmentUnits,
-        )
-      : 0;
+  const warmBase = clamp(
+    (2 * Math.sqrt(recipe.red * recipe.yellow) * 1.02) / pigmentUnits,
+  );
+  const blueShare = recipe.blue / pigmentUnits;
+  const blueTransition = clamp(blueShare / 0.08);
+  const blueMask =
+    1 -
+    blueTransition *
+      blueTransition *
+      (3 - 2 * blueTransition);
+  const warmInteraction = warmBase * blueMask;
   return WAVELENGTHS.map((wavelength, wavelengthIndex) => {
     let mixedAbsorption = 0;
     let mixedScattering = 0;
@@ -392,8 +413,9 @@ const suggestJapaneseName = (
  * viscosity, spread, drying, and intensity so transparent washes preserve the
  * same intrinsic hue and reveal the colour underneath when composited.
  */
-export function mixPaint(recipeInput: PaintRecipe = {}): MixedPaintColor {
-  const recipe = normalizePaintRecipe(recipeInput);
+function calculateMixedPaint(
+  recipe: Required<PaintRecipe>,
+): MixedPaintColor {
   const pigmentUnits = PIGMENT_IDS.reduce(
     (total, pigment) => total + recipe[pigment],
     0,
@@ -468,6 +490,24 @@ export function mixPaint(recipeInput: PaintRecipe = {}): MixedPaintColor {
     dryingSpeed: round(dryingSpeed),
     name: suggestJapaneseName(recipe, hsl, waterRatio),
   };
+}
+
+export function mixPaint(recipeInput: PaintRecipe = {}): MixedPaintColor {
+  return calculateMixedPaint(normalizePaintRecipe(recipeInput));
+}
+
+/**
+ * Calculate paint from continuous local proportions.
+ *
+ * The regular recipe API intentionally accepts integer spoonfuls. Spatial
+ * overlap produces fractional contributions at dab edges, so this variant
+ * preserves those proportions instead of rounding a visible colour to a
+ * nearby integer recipe.
+ */
+export function mixPaintProportions(
+  recipeInput: PaintRecipe = {},
+): MixedPaintColor {
+  return calculateMixedPaint(normalizePaintProportions(recipeInput));
 }
 
 /** Descriptive alias for callers that prefer a calculator-style name. */
