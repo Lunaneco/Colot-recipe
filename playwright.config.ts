@@ -32,8 +32,30 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
+      testIgnore: "**/mobile-touch-regressions.e2e.spec.ts",
       use: {
         ...devices["Desktop Chrome"],
+      },
+    },
+    {
+      name: "android-chromium",
+      testMatch: "**/mobile-touch-regressions.e2e.spec.ts",
+      use: {
+        ...devices["Pixel 5"],
+      },
+    },
+    {
+      name: "iphone-webkit",
+      testMatch: "**/mobile-touch-regressions.e2e.spec.ts",
+      use: {
+        ...devices["iPhone 13"],
+      },
+    },
+    {
+      name: "iphone-se-webkit",
+      testMatch: "**/mobile-touch-regressions.e2e.spec.ts",
+      use: {
+        ...devices["iPhone SE"],
       },
     },
   ],

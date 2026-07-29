@@ -1439,6 +1439,7 @@ button:disabled {
   border: 0;
   background: transparent;
   cursor: pointer;
+  touch-action: manipulation;
 }
 
 .saved-swatch__paint {
@@ -1961,6 +1962,7 @@ button:disabled {
     0 12px 28px rgba(64, 45, 25, 0.12),
     0 2px 5px rgba(64, 45, 25, 0.08);
   cursor: crosshair;
+  isolation: isolate;
   touch-action: none;
 }
 
@@ -3179,7 +3181,9 @@ button:disabled {
   }
 
   .paint-surface-shell {
-    min-height: 305px;
+    min-height: 0;
+    flex-direction: column;
+    gap: 6px;
   }
 
   .canvas-size-switcher {
@@ -3214,15 +3218,19 @@ button:disabled {
   }
 
   .canvas-floating-actions {
-    right: 8px;
-    bottom: 8px;
-    left: 8px;
+    position: static;
+    z-index: auto;
+    gap: 6px;
+    flex: 0 0 auto;
+    pointer-events: auto;
   }
 
   .canvas-floating-actions button {
+    flex: 1;
     min-height: 44px;
     padding: 0 10px;
     font-size: 9px;
+    touch-action: manipulation;
   }
 
   .recipe-card {
