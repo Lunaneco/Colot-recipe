@@ -13,6 +13,7 @@ import {
   type PigmentId,
   type RecipeUnits,
 } from "./types";
+import { paintStepUnits } from "./paintSteps";
 
 export type SpatialMixState = {
   recipe: RecipeUnits;
@@ -75,16 +76,14 @@ function dabRadii(
   step: PaintStep,
   viewport: SpatialSampleViewport,
   radiusScale = 1,
+  role: "pigment" | "water" = "pigment",
 ) {
   const radius = SIZE_RADIUS[step.size];
-  const waterScale = step.material === "water" ? 1.42 : 1;
+  const horizontalScale = role === "water" ? 1.42 : 1;
+  const verticalScale = role === "water" ? 1.08 : 0.82;
   return {
-    x: (radius * waterScale * radiusScale) / viewport.width,
-    y:
-      (radius *
-        (step.material === "water" ? 1.08 : 0.82) *
-        radiusScale) /
-      viewport.height,
+    x: (radius * horizontalScale * radiusScale) / viewport.width,
+    y: (radius * verticalScale * radiusScale) / viewport.height,
   };
 }
 
@@ -94,8 +93,9 @@ function dabContribution(
   y: number,
   viewport: SpatialSampleViewport,
   radiusScale = 1,
+  role: "pigment" | "water" = "pigment",
 ) {
-  const radii = dabRadii(step, viewport, radiusScale);
+  const radii = dabRadii(step, viewport, radiusScale, role);
   const dx = (x - step.x) / radii.x;
   const dy = (y - step.y) / radii.y;
   const squaredDistance = dx * dx + dy * dy;
@@ -368,12 +368,15 @@ function sampleSpatialPaintFromSteps(
   // First measure local water. It can carry nearby pigment slightly beyond
   // the edge of a dry dab, but it never changes a distant, unrelated area.
   for (const step of steps) {
-    if (step.material !== "water") continue;
-    weights.water += dabContribution(
+    const waterUnits = paintStepUnits(step, "water");
+    if (waterUnits <= 0) continue;
+    weights.water += waterUnits * dabContribution(
       step,
       point.x,
       point.y,
       viewport,
+      1,
+      "water",
     );
   }
 
@@ -395,14 +398,21 @@ function sampleSpatialPaintFromSteps(
   const wetSpread = 1 + wetness * 0.32;
 
   for (const step of steps) {
-    if (step.material === "water") continue;
-    weights[step.material] += dabContribution(
+    const hasPigment = PIGMENT_IDS.some(
+      (pigment) => paintStepUnits(step, pigment) > 0,
+    );
+    if (!hasPigment) continue;
+    const contribution = dabContribution(
       step,
       point.x,
       point.y,
       viewport,
       wetSpread,
+      "pigment",
     );
+    for (const pigment of PIGMENT_IDS) {
+      weights[pigment] += paintStepUnits(step, pigment) * contribution;
+    }
   }
 
   // A mixing stroke uses the material amounts captured when the gesture was
@@ -482,11 +492,20 @@ export function createSpatialPaintSampler(
   for (const step of state.steps) {
     // Pigment may spread into a neighbouring wet dab by up to 32%, so the
     // spatial index must include that maximum reach.
-    const radii = dabRadii(
-      step,
-      viewport,
-      step.material === "water" ? 1 : 1.32,
+    const hasPigment = PIGMENT_IDS.some(
+      (pigment) => paintStepUnits(step, pigment) > 0,
     );
+    const hasWater = paintStepUnits(step, "water") > 0;
+    const pigmentRadii = hasPigment
+      ? dabRadii(step, viewport, 1.32, "pigment")
+      : { x: 0, y: 0 };
+    const waterRadii = hasWater
+      ? dabRadii(step, viewport, 1, "water")
+      : { x: 0, y: 0 };
+    const radii = {
+      x: Math.max(pigmentRadii.x, waterRadii.x),
+      y: Math.max(pigmentRadii.y, waterRadii.y),
+    };
     const firstColumn = Math.max(
       0,
       Math.floor((step.x - radii.x) * SPATIAL_INDEX_COLUMNS),

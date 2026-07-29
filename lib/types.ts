@@ -66,6 +66,11 @@ export type RecipeUnits = Record<MaterialId, number>;
 export type PaintStep = {
   id: string;
   material: MaterialId;
+  /**
+   * A saved colour placed as one batch. When omitted, the step contributes
+   * exactly one unit of `material`, preserving all legacy paint steps.
+   */
+  recipe?: RecipeUnits;
   size: PaintSize;
   x: number;
   y: number;

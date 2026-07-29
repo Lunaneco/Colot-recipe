@@ -241,7 +241,7 @@ test("赤3・黄2・白1・水2を作り、履歴・保存・再読込・おえ�
   const savedColor = page.getByTestId("saved-color-0");
   await expect(savedColor).toBeVisible();
   await expect(savedColor).toHaveAccessibleName(
-    `1番 ${TEST_COLOR_NAME}。選択中。この色を選び直す`,
+    `1番 ${TEST_COLOR_NAME}を選ぶ`,
   );
   await savedColor.click();
   await expect(savedColor).toHaveAttribute("aria-pressed", "true");

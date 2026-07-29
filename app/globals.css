@@ -1177,6 +1177,48 @@ button:disabled {
   transform: rotate(-9deg) scale(0.88);
 }
 
+.material-button--recipe .material-button__blob {
+  background:
+    radial-gradient(circle at 30% 22%, rgba(255, 255, 255, 0.46), transparent 23%),
+    color-mix(
+      in srgb,
+      var(--recipe-material) var(--recipe-material-opacity),
+      var(--paper-0)
+    );
+}
+
+.recipe-material-label {
+  display: grid;
+  place-items: center;
+  flex: 0 0 20px;
+  border-left: 1px solid var(--line);
+  color: var(--ink-500);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-orientation: upright;
+  writing-mode: vertical-rl;
+}
+
+.material-button--recipe > span:not(.material-button__blob):not(.material-selected-mark) {
+  grid-column: 2;
+  grid-row: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recipe-material-ratio {
+  grid-column: 2;
+  grid-row: 2;
+  overflow: hidden;
+  color: var(--ink-500);
+  font-size: 8px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .material-button kbd {
   align-self: end;
   color: var(--ink-500);
@@ -2627,6 +2669,13 @@ button:disabled {
   color: var(--action);
 }
 
+.dialog-actions-grid button:first-child {
+  grid-column: 1 / -1;
+  border-color: color-mix(in srgb, var(--action) 34%, var(--line));
+  background: color-mix(in srgb, var(--action) 8%, var(--paper-0));
+  color: var(--action);
+}
+
 .danger-text-button {
   display: flex;
   align-items: center;
@@ -3308,6 +3357,20 @@ button:disabled {
 
   .material-button > span:not(.material-button__blob):not(.material-selected-mark) {
     font-size: 9px;
+  }
+
+  .material-button--recipe > span:not(.material-button__blob):not(.material-selected-mark) {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .recipe-material-ratio {
+    display: none;
+  }
+
+  .recipe-material-label {
+    flex-basis: 14px;
+    font-size: 7px;
   }
 
   .material-button kbd,

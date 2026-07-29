@@ -24,6 +24,14 @@ import { ColorDetailDialog, SaveColorDialog } from "../components/ColorDialogs";
 import { MixingStudio } from "../components/MixingStudio";
 import { SavedPalette } from "../components/SavedPalette";
 import { mixPaint } from "../lib/colorScience";
+import {
+  paintStepRecipe,
+  primaryMaterialForRecipe,
+} from "../lib/paintSteps";
+import {
+  MAX_RECIPE_UNITS_PER_MATERIAL,
+  MAX_TOTAL_RECIPE_UNITS,
+} from "../lib/savedColorSchema";
 import type { SpatialPaintSample } from "../lib/spatialMix";
 import {
   exportAppBackup,
@@ -77,6 +85,7 @@ type MixerState = {
 
 type MixerUiSettings = {
   selectedMaterial: MixerTool;
+  selectedRecipeColorId?: string;
   paintSize: PaintSize;
   detailedRecipe: boolean;
 };
@@ -164,6 +173,33 @@ function cloneMixedSnapshot(mixed: MixedColorSnapshot): MixedColorSnapshot {
   };
 }
 
+function addRecipeUnits(
+  current: RecipeUnits,
+  addition: RecipeUnits,
+): RecipeUnits {
+  return Object.fromEntries(
+    MATERIAL_IDS.map((material) => [
+      material,
+      current[material] + addition[material],
+    ]),
+  ) as RecipeUnits;
+}
+
+function recipeFitsSaveLimits(recipe: RecipeUnits): boolean {
+  return (
+    MATERIAL_IDS.every(
+      (material) =>
+        Number.isSafeInteger(recipe[material]) &&
+        recipe[material] >= 0 &&
+        recipe[material] <= MAX_RECIPE_UNITS_PER_MATERIAL,
+    ) &&
+    MATERIAL_IDS.reduce(
+      (total, material) => total + recipe[material],
+      0,
+    ) <= MAX_TOTAL_RECIPE_UNITS
+  );
+}
+
 function snapshotFromHex(hex: string): MixedColorSnapshot {
   const value = hex.replace("#", "");
   const rgb = {
@@ -215,6 +251,7 @@ export default function ColorRecipeApp() {
   const savedColors = paletteHistory.state;
   const [mode, setMode] = useState<AppMode>("mix");
   const [selectedMaterial, setSelectedMaterial] = useState<MixerTool>("red");
+  const [selectedRecipeColorId, setSelectedRecipeColorId] = useState<string>();
   const [paintSize, setPaintSize] = useState<PaintSize>("medium");
   const [detailedRecipe, setDetailedRecipe] = useState(false);
   const [activeColorId, setActiveColorId] = useState<string>();
@@ -241,6 +278,21 @@ export default function ColorRecipeApp() {
     0,
   );
   const activeSavedColor = savedColors.find((color) => color.id === activeColorId);
+  const selectedRecipeColor = savedColors.find(
+    (color) => color.id === selectedRecipeColorId,
+  );
+  const mixerRecipeColors = useMemo(() => {
+    const colorsById = new Map(savedColors.map((color) => [color.id, color]));
+    const orderedIds = [
+      ...(selectedRecipeColorId ? [selectedRecipeColorId] : []),
+      ...recentColorIds,
+      ...savedColors.map((color) => color.id),
+    ];
+    return [...new Set(orderedIds)]
+      .map((id) => colorsById.get(id))
+      .filter((color): color is SavedColor => Boolean(color))
+      .slice(0, 8);
+  }, [recentColorIds, savedColors, selectedRecipeColorId]);
   const fallbackColor = useMemo(() => mixedSnapshot({ ...EMPTY_RECIPE, red: 1 }), []);
   const activeDrawingColor =
     activeSavedColor?.mixed ??
@@ -280,6 +332,12 @@ export default function ColorRecipeApp() {
         MIXER_TOOL_IDS.includes(mixerUi.selectedMaterial)
       ) {
         setSelectedMaterial(mixerUi.selectedMaterial);
+      }
+      if (
+        mixerUi?.selectedRecipeColorId &&
+        colors.some((color) => color.id === mixerUi.selectedRecipeColorId)
+      ) {
+        setSelectedRecipeColorId(mixerUi.selectedRecipeColorId);
       }
       if (mixerUi && ["small", "medium", "large"].includes(mixerUi.paintSize)) {
         setPaintSize(mixerUi.paintSize);
@@ -359,6 +417,12 @@ export default function ColorRecipeApp() {
       ) {
         setActiveColorId(undefined);
       }
+      if (
+        selectedRecipeColorId &&
+        !savedColors.some((color) => color.id === selectedRecipeColorId)
+      ) {
+        setSelectedRecipeColorId(undefined);
+      }
       setRecentColorIds((current) => {
         const filtered = current.filter((id) =>
           savedColors.some((color) => color.id === id),
@@ -367,18 +431,26 @@ export default function ColorRecipeApp() {
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeColorId, savedColors]);
+  }, [activeColorId, savedColors, selectedRecipeColorId]);
 
   useEffect(() => {
     if (!hydrated) return;
     void saveSetting<MixerUiSettings>("mixer-ui", {
       selectedMaterial,
+      ...(selectedRecipeColorId ? { selectedRecipeColorId } : {}),
       paintSize,
       detailedRecipe,
     }).catch(() => {
       showToast("混色ツールの設定を保存できませんでした");
     });
-  }, [detailedRecipe, hydrated, paintSize, selectedMaterial, showToast]);
+  }, [
+    detailedRecipe,
+    hydrated,
+    paintSize,
+    selectedMaterial,
+    selectedRecipeColorId,
+    showToast,
+  ]);
 
   useEffect(() => {
     const handleKeyboard = (event: KeyboardEvent) => {
@@ -399,7 +471,10 @@ export default function ColorRecipeApp() {
       }
       if (mode === "mix") {
         const material = MIXER_SHORTCUTS[event.key.toLowerCase()];
-        if (material) setSelectedMaterial(material);
+        if (material) {
+          setSelectedRecipeColorId(undefined);
+          setSelectedMaterial(material);
+        }
       }
     };
     window.addEventListener("keydown", handleKeyboard);
@@ -457,27 +532,39 @@ export default function ColorRecipeApp() {
     x: number,
     y: number,
   ) => {
-    mixer.commit((current) => ({
-      ...current,
-      recipe: {
-        ...current.recipe,
-        [material]: current.recipe[material] + 1,
-      },
-      steps: [
-        ...current.steps,
-        {
-          id: createId("step"),
-          material,
-          size,
-          x,
-          y,
-          createdAt: new Date().toISOString(),
-        },
-      ],
-    }));
-    const nextCount = mixer.state.recipe[material] + 1;
-    const nextTotal =
-      Object.values(mixer.state.recipe).reduce((sum, count) => sum + count, 0) + 1;
+    const addition: RecipeUnits = {
+      ...EMPTY_RECIPE,
+      [material]: 1,
+    };
+    const nextRecipe = addRecipeUnits(mixer.state.recipe, addition);
+    if (!recipeFitsSaveLimits(nextRecipe)) {
+      showToast("配合の保存上限に達したため、これ以上追加できません");
+      return;
+    }
+    mixer.commit((current) => {
+      const committedRecipe = addRecipeUnits(current.recipe, addition);
+      if (!recipeFitsSaveLimits(committedRecipe)) return current;
+      return {
+        ...current,
+        recipe: committedRecipe,
+        steps: [
+          ...current.steps,
+          {
+            id: createId("step"),
+            material,
+            size,
+            x,
+            y,
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      };
+    });
+    const nextCount = nextRecipe[material];
+    const nextTotal = MATERIAL_IDS.reduce(
+      (total, entry) => total + nextRecipe[entry],
+      0,
+    );
     setAnnouncement(
       `${MATERIAL_LABELS[material]}を1単位追加。${MATERIAL_LABELS[material]}は${nextCount}単位、合計${nextTotal}単位`,
     );
@@ -489,29 +576,45 @@ export default function ColorRecipeApp() {
     points: Array<{ x: number; y: number }>,
   ) => {
     const placements = points.slice(0, 80);
-    if (!placements.length) return;
+    if (!placements.length) return false;
+    const addition: RecipeUnits = {
+      ...EMPTY_RECIPE,
+      [material]: placements.length,
+    };
+    if (
+      !recipeFitsSaveLimits(
+        addRecipeUnits(mixer.state.recipe, addition),
+      )
+    ) {
+      showToast(
+        "このなぞり量では配合の保存上限を超えるため、追加しませんでした",
+      );
+      return false;
+    }
     const createdAt = new Date().toISOString();
-    mixer.commit((current) => ({
-      ...current,
-      recipe: {
-        ...current.recipe,
-        [material]: current.recipe[material] + placements.length,
-      },
-      steps: [
-        ...current.steps,
-        ...placements.map((point) => ({
-          id: createId("step"),
-          material,
-          size,
-          x: point.x,
-          y: point.y,
-          createdAt,
-        })),
-      ],
-    }));
+    mixer.commit((current) => {
+      const committedRecipe = addRecipeUnits(current.recipe, addition);
+      if (!recipeFitsSaveLimits(committedRecipe)) return current;
+      return {
+        ...current,
+        recipe: committedRecipe,
+        steps: [
+          ...current.steps,
+          ...placements.map((point) => ({
+            id: createId("step"),
+            material,
+            size,
+            x: point.x,
+            y: point.y,
+            createdAt,
+          })),
+        ],
+      };
+    });
     setAnnouncement(
       `${MATERIAL_LABELS[material]}をなぞった場所へ${placements.length}単位追加しました`,
     );
+    return true;
   };
 
   const eraseNearest = (x: number, y: number) => {
@@ -530,15 +633,22 @@ export default function ColorRecipeApp() {
       return;
     }
     const target = mixer.state.steps[nearestIndex];
+    const targetRecipe = paintStepRecipe(target);
     mixer.commit((current) => ({
       ...current,
-      recipe: {
-        ...current.recipe,
-        [target.material]: Math.max(0, current.recipe[target.material] - 1),
-      },
+      recipe: Object.fromEntries(
+        MATERIAL_IDS.map((material) => [
+          material,
+          Math.max(0, current.recipe[material] - targetRecipe[material]),
+        ]),
+      ) as RecipeUnits,
       steps: current.steps.filter((_, index) => index !== nearestIndex),
     }));
-    setAnnouncement(`${MATERIAL_LABELS[target.material]}を1単位消しました`);
+    if (target.recipe) {
+      setAnnouncement("保存レシピ1バッチを消しました");
+    } else {
+      setAnnouncement(`${MATERIAL_LABELS[target.material]}を1単位消しました`);
+    }
   };
 
   const addMixGesture = (gesture: Omit<MixGesture, "id" | "createdAt">) => {
@@ -570,6 +680,60 @@ export default function ColorRecipeApp() {
 
   const markColorAsRecent = (id: string) => {
     setRecentColorIds((current) => [id, ...current.filter((entry) => entry !== id)].slice(0, 12));
+  };
+
+  const addRecipeColor = (
+    color: SavedColor,
+    size: PaintSize,
+    x: number,
+    y: number,
+  ) => {
+    const batchTotal = MATERIAL_IDS.reduce(
+      (total, material) => total + color.recipe[material],
+      0,
+    );
+    if (batchTotal <= 0) {
+      showToast("この保存色には加えられる配合がありません");
+      return;
+    }
+    const nextRecipe = addRecipeUnits(mixer.state.recipe, color.recipe);
+    if (!recipeFitsSaveLimits(nextRecipe)) {
+      showToast("配合の保存上限に達したため、このレシピ色は追加できません");
+      return;
+    }
+
+    const batchRecipe = { ...color.recipe };
+    mixer.commit((current) => {
+      const committedRecipe = addRecipeUnits(current.recipe, batchRecipe);
+      if (!recipeFitsSaveLimits(committedRecipe)) return current;
+      return {
+        ...current,
+        recipe: committedRecipe,
+        steps: [
+          ...current.steps,
+          {
+            id: createId("recipe-step"),
+            material: primaryMaterialForRecipe(batchRecipe),
+            recipe: batchRecipe,
+            size,
+            x,
+            y,
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      };
+    });
+    markColorAsRecent(color.id);
+    const summary = MATERIAL_IDS
+      .filter((material) => batchRecipe[material] > 0)
+      .map(
+        (material) =>
+          `${MATERIAL_LABELS[material]}${batchRecipe[material]}単位`,
+      )
+      .join("、");
+    setAnnouncement(
+      `保存色「${color.name}」を1バッチ追加。${summary}をそのまま加算しました`,
+    );
   };
 
   const openSaveDialog = (sample?: SpatialPaintSample) => {
@@ -688,6 +852,7 @@ export default function ColorRecipeApp() {
       .map((color, order) => ({ ...color, order }));
     paletteHistory.commit(next);
     if (activeColorId === id) setActiveColorId(undefined);
+    if (selectedRecipeColorId === id) setSelectedRecipeColorId(undefined);
     setDetailColor(undefined);
     showToast("色を削除しました");
   };
@@ -711,11 +876,25 @@ export default function ColorRecipeApp() {
       steps,
       mixGestures: color.mixGestures ?? [],
     });
+    setSelectedRecipeColorId(undefined);
     setSelectedMaterial("red");
     setMode("mix");
     setDetailColor(undefined);
     setPaletteOpen(false);
     showToast(`「${color.name}」を混色パレットに広げました`);
+  };
+
+  const useRecipeColorInMixer = (color: SavedColor) => {
+    setSelectedRecipeColorId(color.id);
+    setActiveColorId(color.id);
+    markColorAsRecent(color.id);
+    setSampledColor(undefined);
+    setMode("mix");
+    setDetailColor(undefined);
+    setPaletteOpen(false);
+    showToast(
+      `「${color.name}」を混色材料にしました。パレットを押すと元の配合を加えます`,
+    );
   };
 
   const useColor = (color: SavedColor, nextMode: AppMode) => {
@@ -937,15 +1116,26 @@ export default function ColorRecipeApp() {
                 canUndo={mixer.canUndo}
                 canRedo={mixer.canRedo}
                 announcement={announcement}
-                onSelectMaterial={setSelectedMaterial}
+                recipeColors={mixerRecipeColors}
+                selectedRecipeColor={selectedRecipeColor}
+                onSelectMaterial={(material) => {
+                  setSelectedRecipeColorId(undefined);
+                  setSelectedMaterial(material);
+                }}
+                onSelectRecipeColor={useRecipeColorInMixer}
                 onSizeChange={setPaintSize}
                 onAdd={addMaterial}
                 onAddStroke={addMaterialStroke}
+                onAddRecipe={addRecipeColor}
                 onErase={eraseNearest}
                 onMix={addMixGesture}
                 onMixAll={mixAll}
                 onClear={() => {
-                  mixer.commit(INITIAL_MIXER);
+                  mixer.commit({
+                    recipe: { ...EMPTY_RECIPE },
+                    steps: [],
+                    mixGestures: [],
+                  });
                   setAnnouncement("混色パレットをまっさらにしました");
                 }}
                 onUndo={mixer.undo}
@@ -1005,13 +1195,23 @@ export default function ColorRecipeApp() {
 
         <SavedPalette
           colors={savedColors}
-          selectedId={activeColorId}
+          selectedId={mode === "mix" ? selectedRecipeColorId : activeColorId}
           open={paletteOpen}
           onClose={() => setPaletteOpen(false)}
           onSelect={(color) => {
             setActiveColorId(color.id);
             setSampledColor(undefined);
-            showToast(`「${color.name}」を選びました。もう一度押すと詳細を開きます`);
+            markColorAsRecent(color.id);
+            if (mode === "mix") {
+              setSelectedRecipeColorId(color.id);
+              showToast(
+                `「${color.name}」を混色材料にしました。パレットを押すと元の配合を加えます`,
+              );
+            } else {
+              showToast(
+                `「${color.name}」を選びました。もう一度押すと詳細を開きます`,
+              );
+            }
           }}
           onOpenDetails={(color) => {
             if (compactLayout) setPaletteOpen(false);
@@ -1064,6 +1264,7 @@ export default function ColorRecipeApp() {
           onDuplicate={duplicateColor}
           onDelete={removeColor}
           onReopen={reopenColor}
+          onUseInMixer={useRecipeColorInMixer}
           onUse={useColor}
         />
       )}

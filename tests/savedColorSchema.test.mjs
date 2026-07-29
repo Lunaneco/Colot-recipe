@@ -102,6 +102,98 @@ test("版付き形式を読み、壊れた項目だけを理由付きで除外�
   assert.match(result.issues[0].message, /日時/);
 });
 
+test("版2はcompound stepの元レシピを安全にJSON往復する", () => {
+  const stepRecipe = { red: 2, blue: 1, yellow: 3, white: 4, water: 5 };
+  const payload = {
+    version: 2,
+    colors: [
+      legacyColor({
+        id: "compound-recipe",
+        steps: [
+          {
+            id: "compound-step",
+            material: "yellow",
+            recipe: stepRecipe,
+            size: "large",
+            x: 0.25,
+            y: 0.75,
+            createdAt: NOW,
+          },
+        ],
+      }),
+    ],
+  };
+
+  const first = parseSavedColorsJson(payload, { now: NOW });
+  const second = parseSavedColorsJson(
+    JSON.stringify({ version: 2, colors: first.colors }),
+    { now: NOW },
+  );
+
+  assert.equal(first.version, 2);
+  assert.equal(first.rejected, 0);
+  assert.deepEqual(first.colors[0].steps[0].recipe, stepRecipe);
+  assert.deepEqual(second.colors[0].steps, first.colors[0].steps);
+  assert.deepEqual(second.colors[0].steps[0].recipe, stepRecipe);
+});
+
+test("版2はcompound step内の不正なレシピ単位を色ごと拒否する", () => {
+  const compoundStep = (recipe) => ({
+    id: "compound-step",
+    material: "red",
+    recipe,
+    size: "medium",
+    x: 0.5,
+    y: 0.5,
+    createdAt: NOW,
+  });
+  const cases = [
+    legacyColor({
+      id: "negative-step-recipe",
+      steps: [compoundStep({ red: -1 })],
+    }),
+    legacyColor({
+      id: "fractional-step-recipe",
+      steps: [compoundStep({ red: 0.5 })],
+    }),
+    legacyColor({
+      id: "nan-step-recipe",
+      steps: [compoundStep({ red: Number.NaN })],
+    }),
+    legacyColor({
+      id: "oversized-step-recipe",
+      steps: [
+        compoundStep({ red: MAX_RECIPE_UNITS_PER_MATERIAL + 1 }),
+      ],
+    }),
+    legacyColor({
+      id: "oversized-step-total",
+      steps: [
+        compoundStep({ red: 1_000, blue: 1_000, yellow: 501 }),
+      ],
+    }),
+    legacyColor({
+      id: "non-object-step-recipe",
+      steps: [compoundStep("red:2")],
+    }),
+    legacyColor({ id: "valid-compound" }),
+  ];
+
+  const result = parseSavedColorsJson(
+    { version: 2, colors: cases },
+    { now: NOW },
+  );
+
+  assert.deepEqual(
+    result.colors.map((color) => color.id),
+    ["valid-compound"],
+  );
+  assert.equal(result.rejected, 6);
+  assert.ok(result.issues.some((issue) => /整数/.test(issue.message)));
+  assert.ok(result.issues.some((issue) => /合計/.test(issue.message)));
+  assert.ok(result.issues.some((issue) => /配合/.test(issue.message)));
+});
+
 test("不正HEX、配列形状、過大単位、重複IDを受け入れない", () => {
   const cases = [
     legacyColor({ id: "bad-hex", mixed: { hex: "D9824A" } }),

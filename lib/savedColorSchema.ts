@@ -11,7 +11,7 @@ import {
   type SavedColor,
 } from "./types";
 
-export const SAVED_COLOR_SCHEMA_VERSION = 1;
+export const SAVED_COLOR_SCHEMA_VERSION = 2;
 export const MAX_IMPORTED_COLORS = 1_000;
 export const MAX_RECIPE_UNITS_PER_MATERIAL = 1_000;
 export const MAX_TOTAL_RECIPE_UNITS = 2_500;
@@ -35,7 +35,7 @@ export type SavedColorImportIssue = {
 
 export type SavedColorImportResult = {
   /** `0` denotes the legacy unversioned array/object shape. */
-  version: 0 | typeof SAVED_COLOR_SCHEMA_VERSION;
+  version: 0 | 1 | typeof SAVED_COLOR_SCHEMA_VERSION;
   colors: SavedColor[];
   rejected: number;
   issues: SavedColorImportIssue[];
@@ -195,10 +195,13 @@ const normalizeStep = (
   if (value.size !== undefined && !isPaintSize(value.size)) {
     throw new SavedColorImportError(`手順${index + 1}の量が不明です`);
   }
+  const recipe =
+    value.recipe === undefined ? undefined : normalizeRecipe(value.recipe);
 
   return {
     id: identifier(value.id, `手順${index + 1}のID`, `import-step-${index}`),
     material: value.material,
+    ...(recipe === undefined ? {} : { recipe }),
     size: value.size ?? "medium",
     x: finiteNumber(value.x, `手順${index + 1}の横位置`, 0, 1),
     y: finiteNumber(value.y, `手順${index + 1}の縦位置`, 0, 1),
@@ -479,6 +482,7 @@ export function parseSavedColorsJson(
       if (
         !Number.isSafeInteger(decoded.version) ||
         (decoded.version !== 0 &&
+          decoded.version !== 1 &&
           decoded.version !== SAVED_COLOR_SCHEMA_VERSION)
       ) {
         throw new SavedColorImportError(
