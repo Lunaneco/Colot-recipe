@@ -126,6 +126,51 @@ test.beforeEach(async ({ context, page }) => {
   );
 });
 
+test("最初の赤・青・黄を指定されたHEXで表示して使える", async ({
+  page,
+}) => {
+  const appPrimaryColors = await page.locator(".color-recipe-app").evaluate(
+    (element) => {
+      const style = getComputedStyle(element);
+      return {
+        red: style.getPropertyValue("--material-red").trim().toUpperCase(),
+        blue: style.getPropertyValue("--material-blue").trim().toUpperCase(),
+        yellow: style
+          .getPropertyValue("--material-yellow")
+          .trim()
+          .toUpperCase(),
+      };
+    },
+  );
+  expect(appPrimaryColors).toEqual({
+    red: "#E60012",
+    blue: "#00A1E9",
+    yellow: "#FFF100",
+  });
+
+  await page
+    .getByRole("button", { name: "くわしい数値を見る" })
+    .click();
+  const canvas = page.getByTestId("mix-canvas");
+  const cases = [
+    ["red", "#E60012", "rgb(230, 0, 18)"],
+    ["blue", "#00A1E9", "rgb(0, 161, 233)"],
+    ["yellow", "#FFF100", "rgb(255, 241, 0)"],
+  ] as const;
+
+  for (const [material, expectedHex, expectedCss] of cases) {
+    const button = page.getByTestId(`material-${material}`);
+    await button.click();
+    await expect(button.locator(".material-button__blob")).toHaveCSS(
+      "background-color",
+      expectedCss,
+    );
+    await canvas.press("Enter");
+    await expect(page.getByTestId("recipe-hex")).toHaveText(expectedHex);
+    await page.getByRole("button", { name: "まっさらに" }).click();
+  }
+});
+
 test("ヘルプからナレーション・字幕付きチュートリアルを再生できる", async ({
   page,
   request,

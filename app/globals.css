@@ -16,6 +16,9 @@
   --action-dark: #234944;
   --focus: #006b9c;
   --danger: #9a3832;
+  --material-red: #e60012;
+  --material-blue: #00a1e9;
+  --material-yellow: #fff100;
   --shadow-card: 0 8px 24px rgba(56, 43, 30, 0.08);
   --shadow-float: 0 14px 42px rgba(51, 37, 24, 0.16);
   --radius-lg: 24px;
@@ -157,19 +160,19 @@ button:disabled {
 .brand-mark i:nth-child(1) {
   top: 9px;
   left: 9px;
-  background: #c94e43;
+  background: var(--material-red);
 }
 
 .brand-mark i:nth-child(2) {
   top: 9px;
   right: 8px;
-  background: #35658d;
+  background: var(--material-blue);
 }
 
 .brand-mark i:nth-child(3) {
   left: 15px;
   bottom: 8px;
-  background: #d6a72c;
+  background: var(--material-yellow);
 }
 
 .brand > span:last-child {
@@ -900,17 +903,17 @@ button:disabled {
 
 .ratio-track__fill--red,
 .recipe-dot--red {
-  background: #c94e43;
+  background: var(--material-red);
 }
 
 .ratio-track__fill--blue,
 .recipe-dot--blue {
-  background: #35658d;
+  background: var(--material-blue);
 }
 
 .ratio-track__fill--yellow,
 .recipe-dot--yellow {
-  background: #d6a72c;
+  background: var(--material-yellow);
 }
 
 .ratio-track__fill--white,
@@ -1147,15 +1150,15 @@ button:disabled {
 }
 
 .material-button--red .material-button__blob {
-  background: #c94e43;
+  background: var(--material-red);
 }
 
 .material-button--blue .material-button__blob {
-  background: #35658d;
+  background: var(--material-blue);
 }
 
 .material-button--yellow .material-button__blob {
-  background: #d6a72c;
+  background: var(--material-yellow);
 }
 
 .material-button--white .material-button__blob {

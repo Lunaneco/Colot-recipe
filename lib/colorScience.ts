@@ -1,4 +1,5 @@
 import {
+  MATERIAL_COLORS,
   MATERIAL_IDS,
   PIGMENT_IDS,
   type MaterialId,
@@ -311,6 +312,78 @@ export const hexToRgb = (hex: string): RGBColor => {
   };
 };
 
+const PRIMARY_PIGMENTS = ["red", "blue", "yellow"] as const;
+const PRIMARY_ANCHOR_START = 0.8;
+const PRIMARY_ENDPOINTS = Object.fromEntries(
+  PRIMARY_PIGMENTS.map((primary) => [
+    primary,
+    {
+      spectral: spectrumToRgb(PIGMENT_REFLECTANCE[primary]),
+      target: hexToRgb(MATERIAL_COLORS[primary]),
+    },
+  ]),
+) as Record<
+  (typeof PRIMARY_PIGMENTS)[number],
+  { spectral: RGBColor; target: RGBColor }
+>;
+
+/**
+ * Keep the three unmixed starting colours exact without replacing the
+ * subtractive spectra that make mixed paint look natural. The correction
+ * eases smoothly to zero before another pigment reaches one fifth of the
+ * pigment load, so overlap colours remain continuous and balanced recipes
+ * retain their physical spectral result.
+ */
+const anchorPrimaryEndpoint = (
+  recipe: Required<PaintRecipe>,
+  spectralRgb: RGBColor,
+): RGBColor => {
+  const pigmentUnits = PIGMENT_IDS.reduce(
+    (total, pigment) => total + recipe[pigment],
+    0,
+  );
+  if (pigmentUnits === 0) return spectralRgb;
+
+  const primary = PRIMARY_PIGMENTS.reduce((dominant, candidate) =>
+    recipe[candidate] > recipe[dominant] ? candidate : dominant,
+  );
+  const primaryShare = recipe[primary] / pigmentUnits;
+  const progress = clamp(
+    (primaryShare - PRIMARY_ANCHOR_START) / (1 - PRIMARY_ANCHOR_START),
+  );
+  if (progress === 0) return spectralRgb;
+
+  const weight = progress * progress * (3 - 2 * progress);
+  const { spectral: spectralEndpoint, target: targetEndpoint } =
+    PRIMARY_ENDPOINTS[primary];
+  return {
+    r: Math.round(
+      clamp(
+        spectralRgb.r +
+          (targetEndpoint.r - spectralEndpoint.r) * weight,
+        0,
+        255,
+      ),
+    ),
+    g: Math.round(
+      clamp(
+        spectralRgb.g +
+          (targetEndpoint.g - spectralEndpoint.g) * weight,
+        0,
+        255,
+      ),
+    ),
+    b: Math.round(
+      clamp(
+        spectralRgb.b +
+          (targetEndpoint.b - spectralEndpoint.b) * weight,
+        0,
+        255,
+      ),
+    ),
+  };
+};
+
 export const rgbToHsl = ({ r, g, b }: RGBColor): HSLColor => {
   const red = r / 255;
   const green = g / 255;
@@ -429,7 +502,10 @@ function calculateMixedPaint(
     ]),
   ) as Record<PigmentKey, number>;
 
-  const rgb = spectrumToRgb(mixReflectance(recipe));
+  const rgb = anchorPrimaryEndpoint(
+    recipe,
+    spectrumToRgb(mixReflectance(recipe)),
+  );
   const hsl = rgbToHsl(rgb);
   const colouredUnits = recipe.red + recipe.blue + recipe.yellow;
 

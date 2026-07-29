@@ -8,19 +8,19 @@
 export const MATERIAL_REGISTRY = {
   red: {
     label: "赤",
-    color: "#c73e3a",
+    color: "#E60012",
     shortcut: "R",
     role: "pigment",
   },
   blue: {
     label: "青",
-    color: "#285a9f",
+    color: "#00A1E9",
     shortcut: "B",
     role: "pigment",
   },
   yellow: {
     label: "黄",
-    color: "#e7b82d",
+    color: "#FFF100",
     shortcut: "Y",
     role: "pigment",
   },
