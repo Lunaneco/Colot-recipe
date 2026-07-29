@@ -937,165 +937,169 @@ export function MixingStudio({
             </div>
           </div>
 
-          <div
-            ref={paintSurface}
-            className={`paint-surface ${isPicker ? "is-sampling" : ""}`}
-            role="application"
-            tabIndex={0}
-            aria-label={
-              selectedRecipeColor
-                ? `混色パレット。保存色「${selectedRecipeColor.name}」を置くにはタップします。元の配合を1バッチそのまま加えます。`
-                : isPicker
-                ? "混色パレット。調べたい場所をタップまたはなぞると、その地点の配合比率を表示します。矢印キーでも調べる場所を移動できます。"
-                : isWater
-                  ? "混色パレット。タップまたはなぞって、触れた場所だけを濡らします。"
-                  : "混色パレット。選択中の材料を置くにはタップ、混ぜるにはドラッグします。"
-            }
-            data-testid="mix-canvas"
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerUp}
-            onPointerCancel={() => {
-              pointerPath.current = [];
-              dragging.current = false;
-              activePointerId.current = undefined;
-              redraw();
-            }}
-            onKeyDown={(event) => {
-              if (event.target !== event.currentTarget) return;
-              if (
-                isPicker &&
-                ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(
-                  event.key,
-                )
-              ) {
-                event.preventDefault();
-                const amount = event.shiftKey ? 0.01 : 0.025;
-                const point = samplePoint ?? { x: 0.5, y: 0.5 };
-                captureSampleAt({
-                  x: Math.max(
-                    0,
-                    Math.min(
-                      1,
-                      point.x +
-                        (event.key === "ArrowRight"
-                          ? amount
-                          : event.key === "ArrowLeft"
-                            ? -amount
-                            : 0),
-                    ),
-                  ),
-                  y: Math.max(
-                    0,
-                    Math.min(
-                      1,
-                      point.y +
-                        (event.key === "ArrowDown"
-                          ? amount
-                          : event.key === "ArrowUp"
-                            ? -amount
-                            : 0),
-                    ),
-                  ),
-                });
-                return;
-              }
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                if (selectedRecipeColor) {
-                  onAddRecipe(selectedRecipeColor, size, 0.5, 0.5);
-                } else if (isPicker) {
-                  captureSampleAt({ x: 0.5, y: 0.5 });
-                } else if (isEraser) onErase(0.5, 0.5);
-                else if (isMaterialTool(selectedMaterial)) {
-                  onAdd(selectedMaterial, size, 0.5, 0.5);
-                }
-              }
-            }}
-          >
-            <canvas
-              ref={paintCanvas}
-              className={`paint-layer paint-layer--source ${webglReady ? "is-webgl" : ""}`}
-              width={CANVAS_WIDTH}
-              height={canvasHeight}
-              aria-hidden="true"
-            />
-            {isPicker && samplePoint && (
-              <span
-                className="sample-point-marker"
-                style={{
-                  left: `${samplePoint.x * 100}%`,
-                  top: `${samplePoint.y * 100}%`,
-                }}
-                aria-hidden="true"
-              >
-                <Pipette size={15} />
-              </span>
-            )}
-            <canvas
-              ref={glossCanvas}
-              className={`paint-layer paint-layer--gloss ${webglReady ? "is-ready" : ""}`}
-              width={CANVAS_WIDTH}
-              height={canvasHeight}
-              aria-hidden="true"
-            />
-            <div className="canvas-size-switcher" aria-label="絵の具の表示サイズ">
-              {(["small", "medium", "large"] as PaintSize[]).map((value) => (
-                <button
-                  key={value}
-                  type="button"
-                  className={size === value ? "is-selected" : ""}
-                  aria-pressed={size === value}
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onClick={() => onSizeChange(value)}
-                >
-                  {{ small: "小", medium: "中", large: "大" }[value]}
-                </button>
-              ))}
-            </div>
-            {state.steps.length > 0 && (
-              <p className="canvas-gesture-hint" aria-hidden="true">
-                {selectedRecipeColor
-                  ? `タップ：${selectedRecipeColor.name}の配合を1バッチ追加`
+          <div className="paint-surface-shell">
+            <div
+              ref={paintSurface}
+              className={`paint-surface ${isPicker ? "is-sampling" : ""}`}
+              role="application"
+              tabIndex={0}
+              aria-label={
+                selectedRecipeColor
+                  ? `混色パレット。保存色「${selectedRecipeColor.name}」を置くにはタップします。元の配合を1バッチそのまま加えます。`
                   : isPicker
-                  ? "タップ／なぞる：その場所の配合を調べる"
-                  : isWater
-                    ? "タップ／なぞる：触れた場所を濡らす"
-                    : "タップ：1単位　・　なぞる：混ぜる"}
-              </p>
-            )}
-            {state.steps.length === 0 && (
-              <div className="canvas-onboarding" aria-hidden="true">
-                <span className="onboarding-drop">
-                  <Droplet size={28} />
+                    ? "混色パレット。調べたい場所をタップまたはなぞると、その地点の配合比率を表示します。矢印キーでも調べる場所を移動できます。"
+                    : isWater
+                      ? "混色パレット。タップまたはなぞって、触れた場所だけを濡らします。"
+                      : "混色パレット。選択中の材料を置くにはタップ、混ぜるにはドラッグします。"
+              }
+              data-testid="mix-canvas"
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={() => {
+                pointerPath.current = [];
+                dragging.current = false;
+                activePointerId.current = undefined;
+                redraw();
+              }}
+              onKeyDown={(event) => {
+                if (event.target !== event.currentTarget) return;
+                if (
+                  isPicker &&
+                  ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(
+                    event.key,
+                  )
+                ) {
+                  event.preventDefault();
+                  const amount = event.shiftKey ? 0.01 : 0.025;
+                  const point = samplePoint ?? { x: 0.5, y: 0.5 };
+                  captureSampleAt({
+                    x: Math.max(
+                      0,
+                      Math.min(
+                        1,
+                        point.x +
+                          (event.key === "ArrowRight"
+                            ? amount
+                            : event.key === "ArrowLeft"
+                              ? -amount
+                              : 0),
+                      ),
+                    ),
+                    y: Math.max(
+                      0,
+                      Math.min(
+                        1,
+                        point.y +
+                          (event.key === "ArrowDown"
+                            ? amount
+                            : event.key === "ArrowUp"
+                              ? -amount
+                              : 0),
+                      ),
+                    ),
+                  });
+                  return;
+                }
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  if (selectedRecipeColor) {
+                    onAddRecipe(selectedRecipeColor, size, 0.5, 0.5);
+                  } else if (isPicker) {
+                    captureSampleAt({ x: 0.5, y: 0.5 });
+                  } else if (isEraser) onErase(0.5, 0.5);
+                  else if (isMaterialTool(selectedMaterial)) {
+                    onAdd(selectedMaterial, size, 0.5, 0.5);
+                  }
+                }
+              }}
+            >
+              <canvas
+                ref={paintCanvas}
+                className={`paint-layer paint-layer--source ${webglReady ? "is-webgl" : ""}`}
+                width={CANVAS_WIDTH}
+                height={canvasHeight}
+                aria-hidden="true"
+              />
+              {isPicker && samplePoint && (
+                <span
+                  className="sample-point-marker"
+                  style={{
+                    left: `${samplePoint.x * 100}%`,
+                    top: `${samplePoint.y * 100}%`,
+                  }}
+                  aria-hidden="true"
+                >
+                  <Pipette size={15} />
                 </span>
-                <strong>
-                  {selectedRecipeColor
-                    ? `「${selectedRecipeColor.name}」をここに置く`
-                    : isWater
-                    ? "ここをなぞって、紙を濡らす"
-                    : "絵の具を選んで、ここに置く"}
-                </strong>
-                <p>
-                  {selectedRecipeColor
-                    ? "1回のタップで元レシピを1バッチ"
-                    : isWater
-                    ? "タップでも、なぞっても使えます"
-                    : "1回のタップで1単位"}
-                  <br />
-                  {selectedRecipeColor
-                    ? "赤・青・黄・白・水を同じ割合で加えます"
-                    : isWater
-                    ? "選んだ部分だけに水が広がります"
-                    : "なぞるほど、なめらかに混ざります"}
-                </p>
+              )}
+              <canvas
+                ref={glossCanvas}
+                className={`paint-layer paint-layer--gloss ${webglReady ? "is-ready" : ""}`}
+                width={CANVAS_WIDTH}
+                height={canvasHeight}
+                aria-hidden="true"
+              />
+              <div
+                className="canvas-size-switcher"
+                aria-label="絵の具の表示サイズ"
+              >
+                {(["small", "medium", "large"] as PaintSize[]).map((value) => (
+                  <button
+                    key={value}
+                    type="button"
+                    className={size === value ? "is-selected" : ""}
+                    aria-pressed={size === value}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={() => onSizeChange(value)}
+                  >
+                    {{ small: "小", medium: "中", large: "大" }[value]}
+                  </button>
+                ))}
               </div>
-            )}
+              {state.steps.length > 0 && (
+                <p className="canvas-gesture-hint" aria-hidden="true">
+                  {selectedRecipeColor
+                    ? `タップ：${selectedRecipeColor.name}の配合を1バッチ追加`
+                    : isPicker
+                      ? "タップ／なぞる：その場所の配合を調べる"
+                      : isWater
+                        ? "タップ／なぞる：触れた場所を濡らす"
+                        : "タップ：1単位　・　なぞる：混ぜる"}
+                </p>
+              )}
+              {state.steps.length === 0 && (
+                <div className="canvas-onboarding" aria-hidden="true">
+                  <span className="onboarding-drop">
+                    <Droplet size={28} />
+                  </span>
+                  <strong>
+                    {selectedRecipeColor
+                      ? `「${selectedRecipeColor.name}」をここに置く`
+                      : isWater
+                        ? "ここをなぞって、紙を濡らす"
+                        : "絵の具を選んで、ここに置く"}
+                  </strong>
+                  <p>
+                    {selectedRecipeColor
+                      ? "1回のタップで元レシピを1バッチ"
+                      : isWater
+                        ? "タップでも、なぞっても使えます"
+                        : "1回のタップで1単位"}
+                    <br />
+                    {selectedRecipeColor
+                      ? "赤・青・黄・白・水を同じ割合で加えます"
+                      : isWater
+                        ? "選んだ部分だけに水が広がります"
+                        : "なぞるほど、なめらかに混ざります"}
+                  </p>
+                </div>
+              )}
+            </div>
             <div className="canvas-floating-actions">
               <button
                 type="button"
                 className="subtle-button"
-                onPointerDown={(event) => event.stopPropagation()}
                 onClick={() => {
                   clearSample();
                   onClear();
@@ -1108,7 +1112,6 @@ export function MixingStudio({
               <button
                 type="button"
                 className="mix-all-button"
-                onPointerDown={(event) => event.stopPropagation()}
                 onClick={onMixAll}
                 disabled={!pigmentUnits}
                 data-testid="mix-all"
