@@ -506,3 +506,32 @@ test("水は選んだ部分だけを濡らし、離れた絵の具の水分量�
   await expect(page.getByTestId("recipe-water")).toHaveCount(0);
   await expect(page.locator(".mobile-water-ratio")).toHaveCount(0);
 });
+
+test("水なしは外周まで不透明な絵の具になり、水を加えた場所だけ透明になる", async ({
+  page,
+}) => {
+  await page.goto("./");
+  await expect(page.locator(".color-recipe-app")).toHaveAttribute(
+    "data-app-ready",
+    "true",
+  );
+  const canvas = page.getByTestId("mix-canvas");
+  const source = canvas.locator("canvas.paint-layer--source");
+  const point = { x: 0.5, y: 0.58 };
+  // Medium paint has a 76 px radius on the 1100 px source canvas.
+  const bodyPoint = { x: point.x + (76 * 0.78) / 1100, y: point.y };
+
+  await page.getByTestId("material-red").click();
+  await clickCanvasAtRatio(canvas, point.x, point.y);
+  const dryCentre = await sourcePixelAt(source, point.x, point.y);
+  const dryBody = await sourcePixelAt(source, bodyPoint.x, bodyPoint.y);
+
+  expect(dryCentre[3]).toBeGreaterThanOrEqual(245);
+  expect(dryBody[3]).toBeGreaterThanOrEqual(220);
+
+  await page.getByTestId("material-water").click();
+  await clickCanvasAtRatio(canvas, point.x, point.y);
+  await expect
+    .poll(async () => (await sourcePixelAt(source, point.x, point.y))[3])
+    .toBeLessThan(dryCentre[3] * 0.75);
+});

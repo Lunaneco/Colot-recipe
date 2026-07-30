@@ -38,6 +38,16 @@ import {
   saveArtwork,
   saveSetting,
 } from "../lib/storage";
+import {
+  appendStrokeSamples,
+  beginStrokeSampling,
+  finishStrokeSampling,
+  stabilizeStrokePoint,
+} from "../lib/strokeSampling";
+import type {
+  StrokePoint,
+  StrokeSamplerState,
+} from "../lib/strokeSampling";
 import type {
   BrushSettings as UiBrushSettings,
   BrushTool,
@@ -234,6 +244,16 @@ async function resizeDataUrl(
   return output.toDataURL("image/png");
 }
 
+function imageDataToPngDataUrl(imageData: ImageData) {
+  const output = document.createElement("canvas");
+  output.width = imageData.width;
+  output.height = imageData.height;
+  output
+    .getContext("2d", { willReadFrequently: true })
+    ?.putImageData(imageData, 0, 0);
+  return output.toDataURL("image/png");
+}
+
 export function DrawingStudio({
   color,
   colorName,
@@ -258,10 +278,9 @@ export function DrawingStudio({
   const canvasRefs = useRef(new Map<string, HTMLCanvasElement>());
   const loadedUrls = useRef(new Map<string, string>());
   const activePointer = useRef<number | undefined>(undefined);
-  const previousPoint = useRef<
-    { x: number; y: number; pressure: number } | undefined
-  >(undefined);
-  const strokeBefore = useRef<string>("");
+  const strokeLayerId = useRef<string | undefined>(undefined);
+  const strokeSampler = useRef<StrokeSamplerState | undefined>(undefined);
+  const strokeBefore = useRef<ImageData | undefined>(undefined);
   const mixerSource = useRef<ImageData | undefined>(undefined);
   const resizeInFlight = useRef(false);
   const layerOpacityStart = useRef<
@@ -648,13 +667,24 @@ export function DrawingStudio({
     return () => media.removeEventListener("change", closeOutsideMobile);
   }, []);
 
+  type PointerSample = Pick<
+    PointerEvent,
+    "clientX" | "clientY" | "pointerType" | "pressure" | "timeStamp"
+  >;
+
   const canvasPoint = (
-    event: React.PointerEvent<HTMLDivElement>,
+    event: PointerSample,
     canvas: HTMLCanvasElement,
-  ) => {
-    const rect = event.currentTarget.getBoundingClientRect();
+    rect: DOMRect,
+  ): StrokePoint => {
     const pointPressure =
-      event.pressure > 0 ? event.pressure : event.pointerType === "mouse" ? 0.5 : 0.35;
+      event.pressure > 0
+        ? event.pressure
+        : event.pointerType === "mouse"
+          ? 0.5
+          : event.pointerType === "pen"
+            ? 0.05
+            : 0.35;
     return {
       x: Math.max(
         0,
@@ -673,7 +703,24 @@ export function DrawingStudio({
         ),
       ),
       pressure: pointPressure,
+      time: event.timeStamp,
     };
+  };
+
+  const coalescedPointerSamples = (
+    event: React.PointerEvent<HTMLDivElement>,
+  ): PointerEvent[] => {
+    const nativeEvent = event.nativeEvent;
+    if (typeof nativeEvent.getCoalescedEvents !== "function") {
+      return [nativeEvent];
+    }
+    try {
+      const samples = nativeEvent.getCoalescedEvents();
+      return samples.length > 0 ? samples : [nativeEvent];
+    } catch {
+      // Older WebViews can expose this method without implementing it.
+      return [nativeEvent];
+    }
   };
 
   const renderComposite = useCallback(
@@ -700,16 +747,31 @@ export function DrawingStudio({
     [background, canvasSize.height, canvasSize.width, layers],
   );
 
-  const paintSegment = useCallback(
+  const brushSamplingSpacing = useCallback(() => {
+    const metrics = computeBrushStampMetrics(0.5, {
+      size:
+        tool === "pencil"
+          ? Math.max(1, settings.size * 0.16)
+          : settings.size,
+      opacity: (settings.opacity / 100) * color.opacity,
+      pressureSensitivity: settings.pressure / 100,
+      moisture: Math.max(settings.water / 100, color.waterRatio),
+      bleed: settings.bleed / 100,
+      hardness: settings.hardness / 100,
+      spacing: settings.spacing / 100,
+    });
+    return Math.max(0.5, metrics.spacing);
+  }, [color.opacity, color.waterRatio, settings, tool]);
+
+  const paintStamp = useCallback(
     (
       canvas: HTMLCanvasElement,
-      from: { x: number; y: number; pressure: number },
-      to: { x: number; y: number; pressure: number },
+      point: StrokePoint,
     ) => {
       const context = canvas.getContext("2d", { willReadFrequently: true });
       if (!context) return;
       const rgb = hexToRgb(color.hex);
-      const metrics = computeBrushStampMetrics(to.pressure, {
+      const metrics = computeBrushStampMetrics(point.pressure, {
         size: tool === "pencil" ? Math.max(1, settings.size * 0.16) : settings.size,
         opacity: (settings.opacity / 100) * color.opacity,
         pressureSensitivity: settings.pressure / 100,
@@ -718,101 +780,104 @@ export function DrawingStudio({
         hardness: settings.hardness / 100,
         spacing: settings.spacing / 100,
       });
-      const alpha = Math.max(0.02, metrics.alpha);
-      const distance = Math.hypot(to.x - from.x, to.y - from.y);
-      const steps = Math.max(1, Math.ceil(distance / Math.max(1, metrics.spacing)));
+      const moisture = Math.max(settings.water / 100, color.waterRatio);
+      const configuredOpacity = (settings.opacity / 100) * color.opacity;
+      // A normal round/flat brush starts as dense body paint. Pressure still
+      // changes its size, while added water removes this floor and restores
+      // the deliberately translucent wash behaviour.
+      const bodyPaintFloor =
+        tool === "round" || tool === "flat"
+          ? configuredOpacity * 0.9 * (1 - moisture) ** 1.2
+          : 0;
+      const alpha = Math.max(0.02, metrics.alpha, bodyPaintFloor);
+      const x = point.x;
+      const y = point.y;
+      const radius =
+        metrics.radius *
+        (tool === "flat" ? 1.05 : tool === "marker" ? 1.25 : 1);
 
       context.save();
       if (tool === "eraser") context.globalCompositeOperation = "destination-out";
       else if (tool === "mixer") context.globalCompositeOperation = "source-over";
       else if (tool === "watercolor") context.globalCompositeOperation = "multiply";
 
-      for (let index = 0; index <= steps; index += 1) {
-        const progress = index / steps;
-        const x = from.x + (to.x - from.x) * progress;
-        const y = from.y + (to.y - from.y) * progress;
-        const radius =
-          metrics.radius *
-          (tool === "flat" ? 1.05 : tool === "marker" ? 1.25 : 1);
-
-        if (tool === "airbrush") {
-          const spray = context.createRadialGradient(x, y, 0, x, y, radius * 1.65);
-          spray.addColorStop(0, `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha * 0.18})`);
-          spray.addColorStop(0.55, `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha * 0.07})`);
-          spray.addColorStop(1, `rgba(${rgb.r},${rgb.g},${rgb.b},0)`);
-          context.fillStyle = spray;
-          context.beginPath();
-          context.arc(x, y, radius * 1.65, 0, Math.PI * 2);
-          context.fill();
-        } else if (tool === "watercolor") {
-          const wash = context.createRadialGradient(x, y, radius * 0.08, x, y, radius * 1.45);
-          wash.addColorStop(0, `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha * 0.28})`);
-          wash.addColorStop(0.72, `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha * 0.17})`);
-          wash.addColorStop(0.9, `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha * 0.26})`);
-          wash.addColorStop(1, `rgba(${rgb.r},${rgb.g},${rgb.b},0)`);
-          context.fillStyle = wash;
-          context.beginPath();
-          context.arc(x, y, radius * 1.45, 0, Math.PI * 2);
-          context.fill();
-        } else if (tool === "blur") {
-          const diameter = Math.max(4, radius * 2);
-          context.filter = `blur(${Math.max(2, metrics.diffusionRadius + 2)}px)`;
-          context.globalAlpha = 0.42;
-          context.drawImage(
-            canvas,
-            Math.max(0, x - radius),
-            Math.max(0, y - radius),
-            diameter,
-            diameter,
-            x - radius,
-            y - radius,
-            diameter,
-            diameter,
-          );
-          context.filter = "none";
+      if (tool === "airbrush") {
+        const spray = context.createRadialGradient(x, y, 0, x, y, radius * 1.65);
+        spray.addColorStop(0, `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha * 0.18})`);
+        spray.addColorStop(0.55, `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha * 0.07})`);
+        spray.addColorStop(1, `rgba(${rgb.r},${rgb.g},${rgb.b},0)`);
+        context.fillStyle = spray;
+        context.beginPath();
+        context.arc(x, y, radius * 1.65, 0, Math.PI * 2);
+        context.fill();
+      } else if (tool === "watercolor") {
+        const wash = context.createRadialGradient(x, y, radius * 0.08, x, y, radius * 1.45);
+        wash.addColorStop(0, `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha * 0.28})`);
+        wash.addColorStop(0.72, `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha * 0.17})`);
+        wash.addColorStop(0.9, `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha * 0.26})`);
+        wash.addColorStop(1, `rgba(${rgb.r},${rgb.g},${rgb.b},0)`);
+        context.fillStyle = wash;
+        context.beginPath();
+        context.arc(x, y, radius * 1.45, 0, Math.PI * 2);
+        context.fill();
+      } else if (tool === "blur") {
+        const diameter = Math.max(4, radius * 2);
+        context.filter = `blur(${Math.max(2, metrics.diffusionRadius + 2)}px)`;
+        context.globalAlpha = 0.42;
+        context.drawImage(
+          canvas,
+          Math.max(0, x - radius),
+          Math.max(0, y - radius),
+          diameter,
+          diameter,
+          x - radius,
+          y - radius,
+          diameter,
+          diameter,
+        );
+        context.filter = "none";
+      } else {
+        const source = mixerSource.current;
+        const sourceX = Math.max(0, Math.min(canvas.width - 1, Math.floor(x)));
+        const sourceY = Math.max(0, Math.min(canvas.height - 1, Math.floor(y)));
+        const sourceOffset = (sourceY * canvas.width + sourceX) * 4;
+        const stampRgb =
+          tool === "mixer" && source
+            ? {
+                r: Math.round(source.data[sourceOffset] * 0.72 + rgb.r * 0.28),
+                g: Math.round(source.data[sourceOffset + 1] * 0.72 + rgb.g * 0.28),
+                b: Math.round(source.data[sourceOffset + 2] * 0.72 + rgb.b * 0.28),
+              }
+            : rgb;
+        const stampAlpha =
+          tool === "marker"
+            ? Math.min(0.36, alpha)
+            : tool === "mixer"
+              ? Math.min(0.28, alpha)
+              : alpha;
+        if (tool === "flat" || tool === "marker") {
+          context.globalAlpha = stampAlpha;
+          context.fillStyle = `rgb(${stampRgb.r},${stampRgb.g},${stampRgb.b})`;
+          context.fillRect(x - radius, y - radius * 0.45, radius * 2, radius * 0.9);
         } else {
-          const source = mixerSource.current;
-          const sourceX = Math.max(0, Math.min(canvas.width - 1, Math.floor(x)));
-          const sourceY = Math.max(0, Math.min(canvas.height - 1, Math.floor(y)));
-          const sourceOffset = (sourceY * canvas.width + sourceX) * 4;
-          const stampRgb =
-            tool === "mixer" && source
-              ? {
-                  r: Math.round(source.data[sourceOffset] * 0.72 + rgb.r * 0.28),
-                  g: Math.round(source.data[sourceOffset + 1] * 0.72 + rgb.g * 0.28),
-                  b: Math.round(source.data[sourceOffset + 2] * 0.72 + rgb.b * 0.28),
-                }
-              : rgb;
-          const stampAlpha =
-            tool === "marker"
-              ? Math.min(0.36, alpha)
-              : tool === "mixer"
-                ? Math.min(0.28, alpha)
-                : alpha;
-          if (tool === "flat" || tool === "marker") {
-            context.globalAlpha = stampAlpha;
-            context.fillStyle = `rgb(${stampRgb.r},${stampRgb.g},${stampRgb.b})`;
-            context.fillRect(x - radius, y - radius * 0.45, radius * 2, radius * 0.9);
-          } else {
-            const gradient = context.createRadialGradient(x, y, 0, x, y, radius);
-            const solidUntil = Math.max(0, Math.min(0.98, 1 - metrics.edgeSoftness));
-            const gradientColor =
-              tool === "eraser"
-                ? `rgba(0,0,0,${stampAlpha})`
-                : `rgba(${stampRgb.r},${stampRgb.g},${stampRgb.b},${stampAlpha})`;
-            const transparentColor =
-              tool === "eraser"
-                ? "rgba(0,0,0,0)"
-                : `rgba(${stampRgb.r},${stampRgb.g},${stampRgb.b},0)`;
-            gradient.addColorStop(0, gradientColor);
-            gradient.addColorStop(solidUntil, gradientColor);
-            gradient.addColorStop(1, transparentColor);
-            context.globalAlpha = 1;
-            context.fillStyle = gradient;
-            context.beginPath();
-            context.arc(x, y, radius, 0, Math.PI * 2);
-            context.fill();
-          }
+          const gradient = context.createRadialGradient(x, y, 0, x, y, radius);
+          const solidUntil = Math.max(0, Math.min(0.98, 1 - metrics.edgeSoftness));
+          const gradientColor =
+            tool === "eraser"
+              ? `rgba(0,0,0,${stampAlpha})`
+              : `rgba(${stampRgb.r},${stampRgb.g},${stampRgb.b},${stampAlpha})`;
+          const transparentColor =
+            tool === "eraser"
+              ? "rgba(0,0,0,0)"
+              : `rgba(${stampRgb.r},${stampRgb.g},${stampRgb.b},0)`;
+          gradient.addColorStop(0, gradientColor);
+          gradient.addColorStop(solidUntil, gradientColor);
+          gradient.addColorStop(1, transparentColor);
+          context.globalAlpha = 1;
+          context.fillStyle = gradient;
+          context.beginPath();
+          context.arc(x, y, radius, 0, Math.PI * 2);
+          context.fill();
         }
       }
       context.restore();
@@ -880,15 +945,67 @@ export function DrawingStudio({
     [color, renderComposite, settings.opacity],
   );
 
+  const appendStrokeInput = (
+    canvas: HTMLCanvasElement,
+    rect: DOMRect,
+    samples: readonly PointerSample[],
+  ) => {
+    const currentState = strokeSampler.current;
+    if (!currentState || !samples.length) return;
+
+    let previous = currentState.lastInput;
+    const stabilized = samples.map((sample) => {
+      const next = stabilizeStrokePoint(
+        previous,
+        canvasPoint(sample, canvas, rect),
+        settings.stabilization / 100,
+      );
+      previous = next;
+      return next;
+    });
+    let samplingState = currentState;
+    let remainingInput = stabilized;
+    do {
+      const sampled = appendStrokeSamples(samplingState, remainingInput, {
+        spacing: brushSamplingSpacing(),
+        maxPoints: 2_048,
+      });
+      sampled.added.forEach((point) => paintStamp(canvas, point));
+
+      // Drawing consumes placements immediately. Compacting creates room for
+      // any input remainder returned at the safety cap without dropping part
+      // of an unusually dense pen event.
+      const latestPlacement =
+        sampled.state.placements[
+          sampled.state.placements.length - 1
+        ];
+      samplingState = {
+        ...sampled.state,
+        placements: [latestPlacement],
+      };
+      remainingInput = sampled.remainingInput;
+    } while (remainingInput.length > 0);
+    strokeSampler.current = samplingState;
+  };
+
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (panEnabled) return;
+    if (
+      panEnabled ||
+      !event.isPrimary ||
+      activePointer.current !== undefined ||
+      (event.pointerType === "mouse" && event.button !== 0)
+    ) {
+      return;
+    }
     if (!activeLayer) return;
     const canvas = canvasRefs.current.get(activeLayer.id);
     if (!canvas) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     activePointer.current = event.pointerId;
-    const point = canvasPoint(event, canvas);
-    strokeBefore.current = canvas.toDataURL("image/png");
+    strokeLayerId.current = activeLayer.id;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const point = canvasPoint(event.nativeEvent, canvas, rect);
+    strokeBefore.current = undefined;
 
     if (tool === "eyedropper") {
       const composite = renderComposite(true);
@@ -912,28 +1029,55 @@ export function DrawingStudio({
       }
       event.currentTarget.releasePointerCapture(event.pointerId);
       activePointer.current = undefined;
+      strokeLayerId.current = undefined;
       return;
     }
     if (tool === "fill") {
+      strokeBefore.current = canvas
+        .getContext("2d", { willReadFrequently: true })
+        ?.getImageData(0, 0, canvas.width, canvas.height);
       const changed = fillAt(canvas, point);
       if (!changed) {
+        strokeBefore.current = undefined;
         event.currentTarget.releasePointerCapture(event.pointerId);
         activePointer.current = undefined;
+        strokeLayerId.current = undefined;
         return;
       }
+      const before = strokeBefore.current
+        ? imageDataToPngDataUrl(strokeBefore.current)
+        : "";
       const after = canvas.toDataURL("image/png");
       pushHistory({
         kind: "canvas",
         layerId: activeLayer.id,
-        before: strokeBefore.current,
+        before,
         after,
         label: "塗りつぶし",
       });
       setLayerDataUrl(activeLayer.id, after);
+      strokeBefore.current = undefined;
       event.currentTarget.releasePointerCapture(event.pointerId);
       activePointer.current = undefined;
+      strokeLayerId.current = undefined;
       return;
     }
+
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+      activePointer.current = undefined;
+      strokeLayerId.current = undefined;
+      return;
+    }
+    // ImageData is a raw copy and avoids PNG compression before the first dab.
+    // The expensive history encoding happens only after the stroke finishes.
+    strokeBefore.current = context.getImageData(
+      0,
+      0,
+      canvas.width,
+      canvas.height,
+    );
     if (tool === "mixer") {
       const composite = renderComposite(true);
       mixerSource.current = composite
@@ -942,46 +1086,96 @@ export function DrawingStudio({
     } else {
       mixerSource.current = undefined;
     }
-    previousPoint.current = point;
-    paintSegment(canvas, point, point);
+    strokeSampler.current = beginStrokeSampling(point);
+    paintStamp(canvas, point);
   };
 
   const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (activePointer.current !== event.pointerId || !activeLayer || !previousPoint.current) {
+    if (
+      activePointer.current !== event.pointerId ||
+      !strokeLayerId.current ||
+      !strokeSampler.current
+    ) {
       return;
     }
-    const canvas = canvasRefs.current.get(activeLayer.id);
+    const canvas = canvasRefs.current.get(strokeLayerId.current);
     if (!canvas) return;
-    const nextPoint = canvasPoint(event, canvas);
-    const stabilization = settings.stabilization / 100;
-    const smoothed = {
-      x: previousPoint.current.x * stabilization + nextPoint.x * (1 - stabilization),
-      y: previousPoint.current.y * stabilization + nextPoint.y * (1 - stabilization),
-      pressure: nextPoint.pressure,
-    };
-    paintSegment(canvas, previousPoint.current, smoothed);
-    previousPoint.current = smoothed;
+    appendStrokeInput(
+      canvas,
+      event.currentTarget.getBoundingClientRect(),
+      coalescedPointerSamples(event),
+    );
   };
 
-  const endStroke = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (activePointer.current !== event.pointerId || !activeLayer) return;
-    const canvas = canvasRefs.current.get(activeLayer.id);
+  const finishStroke = (
+    event: React.PointerEvent<HTMLDivElement>,
+    includeEndpoint: boolean,
+  ) => {
+    if (activePointer.current !== event.pointerId) return;
+    const layerId = strokeLayerId.current;
+    const canvas = layerId
+      ? canvasRefs.current.get(layerId)
+      : undefined;
+    activePointer.current = undefined;
+    strokeLayerId.current = undefined;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
-    activePointer.current = undefined;
-    previousPoint.current = undefined;
+    if (!layerId || !canvas || !strokeSampler.current) {
+      strokeSampler.current = undefined;
+      strokeBefore.current = undefined;
+      mixerSource.current = undefined;
+      return;
+    }
+
+    if (includeEndpoint) {
+      const samples = coalescedPointerSamples(event);
+      const rect = event.currentTarget.getBoundingClientRect();
+      appendStrokeInput(canvas, rect, samples);
+      const currentState = strokeSampler.current;
+      if (currentState) {
+        const finished = finishStrokeSampling(
+          currentState,
+          canvasPoint(event.nativeEvent, canvas, rect),
+          {
+            spacing: brushSamplingSpacing(),
+            maxPoints: 2_048,
+          },
+        );
+        finished.added.forEach((point) => paintStamp(canvas, point));
+      }
+    }
+
+    const beforeImage = strokeBefore.current;
+    strokeSampler.current = undefined;
+    strokeBefore.current = undefined;
     mixerSource.current = undefined;
-    if (!canvas) return;
+    if (!beforeImage) return;
     const after = canvas.toDataURL("image/png");
     pushHistory({
       kind: "canvas",
-      layerId: activeLayer.id,
-      before: strokeBefore.current,
+      layerId,
+      before: imageDataToPngDataUrl(beforeImage),
       after,
       label: tool === "eraser" ? "消去" : "描画",
     });
-    setLayerDataUrl(activeLayer.id, after);
+    if (layerId) setLayerDataUrl(layerId, after);
+  };
+
+  const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    finishStroke(event, true);
+  };
+
+  const handlePointerCancel = (
+    event: React.PointerEvent<HTMLDivElement>,
+  ) => {
+    finishStroke(event, false);
+  };
+
+  const handleLostPointerCapture = (
+    event: React.PointerEvent<HTMLDivElement>,
+  ) => {
+    finishStroke(event, false);
   };
 
   const clearActiveLayer = () => {
@@ -1225,8 +1419,9 @@ export function DrawingStudio({
                   }}
                   onPointerDown={handlePointerDown}
                   onPointerMove={handlePointerMove}
-                  onPointerUp={endStroke}
-                  onPointerCancel={endStroke}
+                  onPointerUp={handlePointerUp}
+                  onPointerCancel={handlePointerCancel}
+                  onLostPointerCapture={handleLostPointerCapture}
                   data-testid="drawing-canvas"
                 >
                   {layers.map((layer) => (

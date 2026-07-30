@@ -542,6 +542,11 @@ button:disabled {
   opacity: 1;
 }
 
+.paint-layer--gesture-preview {
+  z-index: 3;
+  opacity: 1;
+}
+
 .paint-hold-preview {
   position: absolute;
   z-index: 4;
@@ -550,12 +555,12 @@ button:disabled {
   border-radius: 50%;
   pointer-events: none;
   transform: translate(-50%, -50%);
-  filter: saturate(0.98);
-  opacity: 0.72;
+  filter: saturate(1.02);
+  opacity: 0.98;
   transition:
-    width 180ms ease-out,
-    clip-path 180ms ease-out,
-    opacity 140ms ease;
+    width 80ms ease-out,
+    clip-path 80ms ease-out,
+    opacity 90ms ease;
 }
 
 .paint-hold-preview.is-holding {
@@ -564,6 +569,15 @@ button:disabled {
     inset 0 0 12px rgba(24, 38, 52, 0.12),
     0 2px 9px rgba(24, 38, 52, 0.1);
   animation: hold-paint-breathe 900ms ease-in-out infinite alternate;
+  opacity: 1;
+}
+
+.paint-hold-preview.is-water {
+  filter: saturate(0.98);
+  opacity: 0.72;
+}
+
+.paint-hold-preview.is-water.is-holding {
   opacity: 0.86;
 }
 

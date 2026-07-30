@@ -78,6 +78,13 @@ type StoredColoringProgress = {
   updatedAt: string;
 };
 
+type BrushStrokeSettings = {
+  colorHex: string;
+  colorName: string;
+  opacity: number;
+  size: number;
+};
+
 const TEMPLATES: TemplateDefinition[] = [
   { id: "bear", label: "くま", description: "にっこりテディベア", icon: PawPrint },
   { id: "rabbit", label: "うさぎ", description: "にんじんとうさぎ", icon: Rabbit },
@@ -512,6 +519,31 @@ async function stableImageId(dataUrl: string) {
   return `fnv1a-${(hash >>> 0).toString(16).padStart(8, "0")}-${bytes.length}`;
 }
 
+function imageDataToPngDataUrl(imageData: ImageData) {
+  const canvas = document.createElement("canvas");
+  canvas.width = imageData.width;
+  canvas.height = imageData.height;
+  const context = canvas.getContext("2d");
+  if (!context) return undefined;
+  context.putImageData(imageData, 0, 0);
+  return canvas.toDataURL("image/png");
+}
+
+function coalescedPointerSamples(
+  event: React.PointerEvent<HTMLDivElement>,
+) {
+  const nativeEvent = event.nativeEvent;
+  if (typeof nativeEvent.getCoalescedEvents === "function") {
+    try {
+      const samples = nativeEvent.getCoalescedEvents();
+      return samples.length > 0 ? samples : [nativeEvent];
+    } catch {
+      // Some older WebViews expose the API without supporting the call.
+    }
+  }
+  return [nativeEvent];
+}
+
 export function ColoringStudio({
   color,
   colorName,
@@ -538,6 +570,8 @@ export function ColoringStudio({
   const previousPoint = useRef<{ x: number; y: number } | undefined>(
     undefined,
   );
+  const brushBefore = useRef<ImageData | undefined>(undefined);
+  const activeBrush = useRef<BrushStrokeSettings | undefined>(undefined);
   const undoStack = useRef<string[]>([]);
   const redoStack = useRef<string[]>([]);
   const redrawGeneration = useRef(0);
@@ -709,8 +743,10 @@ export function ColoringStudio({
     });
   }, [redrawTemplate, settingsHydrated]);
 
-  const canvasPoint = (event: React.PointerEvent<HTMLDivElement>) => {
-    const rect = event.currentTarget.getBoundingClientRect();
+  const canvasPoint = (
+    event: Pick<PointerEvent, "clientX" | "clientY">,
+    rect: DOMRect,
+  ) => {
     return {
       x: Math.max(
         0,
@@ -820,7 +856,14 @@ export function ColoringStudio({
   };
 
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (panEnabled) return;
+    if (
+      panEnabled ||
+      pointerId.current !== undefined ||
+      !event.isPrimary ||
+      (event.pointerType === "mouse" && event.button !== 0)
+    ) {
+      return;
+    }
     const canvas = fillCanvas.current;
     const line = lineCanvas.current;
     const context = canvas?.getContext("2d", { willReadFrequently: true });
@@ -828,12 +871,15 @@ export function ColoringStudio({
     if (!canvas || !line || !context || !lineContext) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     pointerId.current = event.pointerId;
-    const point = canvasPoint(event);
-    const before = canvas.toDataURL("image/png");
-    previousPoint.current = point;
-    (event.currentTarget as HTMLDivElement).dataset.before = before;
+    const point = canvasPoint(
+      event.nativeEvent,
+      event.currentTarget.getBoundingClientRect(),
+    );
 
     if (paintMode === "fill") {
+      const before = canvas.toDataURL("image/png");
+      previousPoint.current = point;
+      (event.currentTarget as HTMLDivElement).dataset.before = before;
       const imageData = context.getImageData(0, 0, WIDTH, HEIGHT);
       const lineImageData = lineContext.getImageData(0, 0, WIDTH, HEIGHT);
       const value = color.hex.replace("#", "");
@@ -876,57 +922,119 @@ export function ColoringStudio({
       return;
     }
 
+    brushBefore.current = context.getImageData(0, 0, WIDTH, HEIGHT);
+    activeBrush.current = {
+      colorHex: color.hex,
+      colorName,
+      opacity: Math.max(0.02, color.opacity),
+      size: brushSize,
+    };
+    previousPoint.current = point;
     context.save();
-    context.globalAlpha = Math.max(0.02, color.opacity);
-    context.fillStyle = color.hex;
+    context.globalAlpha = activeBrush.current.opacity;
+    context.fillStyle = activeBrush.current.colorHex;
     context.beginPath();
-    context.arc(point.x, point.y, brushSize / 2, 0, Math.PI * 2);
+    context.arc(point.x, point.y, activeBrush.current.size / 2, 0, Math.PI * 2);
     context.fill();
     context.restore();
   };
 
-  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+  const paintBrushSamples = (
+    event: React.PointerEvent<HTMLDivElement>,
+    includeEndpoint = false,
+  ) => {
     if (
-      paintMode !== "brush" ||
       pointerId.current !== event.pointerId ||
-      !previousPoint.current
+      !previousPoint.current ||
+      !activeBrush.current
     ) {
       return;
     }
     const canvas = fillCanvas.current;
     const context = canvas?.getContext("2d");
     if (!canvas || !context) return;
-    const point = canvasPoint(event);
+    const rect = event.currentTarget.getBoundingClientRect();
+    let samples = coalescedPointerSamples(event);
+    const lastSample = samples[samples.length - 1];
+    if (
+      includeEndpoint &&
+      (lastSample.clientX !== event.nativeEvent.clientX ||
+        lastSample.clientY !== event.nativeEvent.clientY ||
+        lastSample.timeStamp !== event.nativeEvent.timeStamp)
+    ) {
+      samples = [...samples, event.nativeEvent];
+    }
+    const points = samples.map((sample) =>
+      canvasPoint(sample, rect),
+    );
+    let previous = previousPoint.current;
+    const path = points.filter((point) => {
+      if (point.x === previous.x && point.y === previous.y) return false;
+      previous = point;
+      return true;
+    });
+    if (path.length === 0) return;
+    const brush = activeBrush.current;
     context.save();
     context.lineCap = "round";
     context.lineJoin = "round";
-    context.lineWidth = brushSize;
-    context.globalAlpha = Math.max(0.02, color.opacity);
-    context.strokeStyle = color.hex;
+    context.lineWidth = brush.size;
+    context.globalAlpha = brush.opacity;
+    context.strokeStyle = brush.colorHex;
     context.beginPath();
     context.moveTo(previousPoint.current.x, previousPoint.current.y);
-    context.lineTo(point.x, point.y);
+    path.forEach((point) => context.lineTo(point.x, point.y));
     context.stroke();
     context.restore();
-    previousPoint.current = point;
+    previousPoint.current = path[path.length - 1];
   };
 
-  const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (paintMode !== "brush" || pointerId.current !== event.pointerId) return;
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    paintBrushSamples(event);
+  };
+
+  const finishBrushStroke = (
+    event: React.PointerEvent<HTMLDivElement>,
+    includeEndpoint: boolean,
+  ) => {
+    if (
+      pointerId.current !== event.pointerId ||
+      !activeBrush.current
+    ) {
+      return;
+    }
+    if (includeEndpoint) {
+      paintBrushSamples(event, true);
+    }
+    pointerId.current = undefined;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
-    pointerId.current = undefined;
+    const brush = activeBrush.current;
+    const beforeImageData = brushBefore.current;
     previousPoint.current = undefined;
-    const before = event.currentTarget.dataset.before;
-    delete event.currentTarget.dataset.before;
+    activeBrush.current = undefined;
+    brushBefore.current = undefined;
+    const before = beforeImageData
+      ? imageDataToPngDataUrl(beforeImageData)
+      : undefined;
     const after = fillCanvas.current?.toDataURL("image/png");
     if (before && after && before !== after) {
       pushHistory(before);
-      setStatus(`${colorName}でブラシ塗りしました`);
+      setStatus(`${brush.colorName}でブラシ塗りしました`);
     } else {
       setStatus("キャンバスに変化はありませんでした");
     }
+  };
+
+  const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    finishBrushStroke(event, true);
+  };
+
+  const handlePointerCancel = (
+    event: React.PointerEvent<HTMLDivElement>,
+  ) => {
+    finishBrushStroke(event, false);
   };
 
   const selectTemplate = (next: TemplateId) => {
@@ -1130,7 +1238,8 @@ export function ColoringStudio({
                   onPointerDown={handlePointerDown}
                   onPointerMove={handlePointerMove}
                   onPointerUp={handlePointerUp}
-                  onPointerCancel={handlePointerUp}
+                  onPointerCancel={handlePointerCancel}
+                  onLostPointerCapture={handlePointerCancel}
                   data-testid="coloring-canvas"
                 >
                   <canvas

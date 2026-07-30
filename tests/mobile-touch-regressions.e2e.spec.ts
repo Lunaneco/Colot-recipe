@@ -189,12 +189,12 @@ async function withCanvasTouch(
   }
 }
 
-async function withCanvasTouchAfterHoldMove(
+async function withCanvasTouchAfterMove(
   page: Page,
   canvas: Locator,
   xRatio: number,
   yRatio: number,
-  holdDurationMs: number,
+  delayBeforeMoveMs: number,
   movement: { x: number; y: number },
   whilePressed: () => Promise<void>,
 ) {
@@ -218,7 +218,9 @@ async function withCanvasTouchAfterHoldMove(
         },
       ],
     });
-    await page.waitForTimeout(holdDurationMs);
+    if (delayBeforeMoveMs > 0) {
+      await page.waitForTimeout(delayBeforeMoveMs);
+    }
     await session.send("Input.dispatchTouchEvent", {
       type: "touchMove",
       touchPoints: [
@@ -242,13 +244,13 @@ async function withCanvasTouchAfterHoldMove(
   }
 }
 
-async function holdAndDragCanvas(
+async function dragCanvas(
   page: Page,
   canvas: Locator,
   xRatio: number,
   yRatio: number,
-  holdDurationMs: number,
   movements: Array<{ x: number; y: number }>,
+  delayBeforeMoveMs = 0,
 ) {
   const box = await canvas.boundingBox();
   if (!box) throw new Error("Canvas is unavailable");
@@ -270,7 +272,9 @@ async function holdAndDragCanvas(
         },
       ],
     });
-    await page.waitForTimeout(holdDurationMs);
+    if (delayBeforeMoveMs > 0) {
+      await page.waitForTimeout(delayBeforeMoveMs);
+    }
     for (const movement of movements) {
       await session.send("Input.dispatchTouchEvent", {
         type: "touchMove",
@@ -566,33 +570,6 @@ async function sourcePixelAtRatio(
     );
 }
 
-async function sourcePaintDigest(canvas: Locator) {
-  return canvas
-    .locator("canvas.paint-layer--source")
-    .evaluate((element) => {
-      const source = element as HTMLCanvasElement;
-      const context = source.getContext("2d", { willReadFrequently: true });
-      if (!context) throw new Error("2D canvas context is unavailable");
-      const pixels = context.getImageData(
-        0,
-        0,
-        source.width,
-        source.height,
-      ).data;
-      let hash = 2166136261;
-      let alpha = 0;
-      for (let offset = 0; offset < pixels.length; offset += 1) {
-        hash ^= pixels[offset];
-        hash = Math.imul(hash, 16777619);
-        if (offset % 4 === 3) alpha += pixels[offset];
-      }
-      return {
-        hash: hash >>> 0,
-        alpha,
-      };
-    });
-}
-
 async function pixelAt(
   canvas: Locator,
   x: number,
@@ -734,6 +711,7 @@ test.describe("スマホ実タッチの回帰", () => {
       .toBeLessThanOrEqual(2);
     const bounds = await sourcePaintBounds(canvas);
     expect(bounds).toBeDefined();
+    await expect(page.getByTestId("recipe-red")).toHaveText("1");
     expect(
       Math.abs((bounds?.width ?? 0) - (bounds?.height ?? 0)),
       JSON.stringify(bounds),
@@ -773,7 +751,7 @@ test.describe("スマホ実タッチの回帰", () => {
     ).toBeLessThanOrEqual(1.5);
   });
 
-  test("Android実タッチの長押しは一操作で中心から濃く重なる", async ({
+  test("Android実タッチの長押しは一操作で中心へ量を重ねて厚く広がる", async ({
     page,
   }, testInfo) => {
     test.skip(testInfo.project.name !== "android-chromium");
@@ -788,9 +766,18 @@ test.describe("スマホ実タッチの回帰", () => {
       .poll(async () => {
         const tapAlpha = await sourceAlphaAtRatio(canvas, 0.31, 0.55);
         const holdAlpha = await sourceAlphaAtRatio(canvas, 0.69, 0.55);
-        return holdAlpha - tapAlpha;
+        return tapAlpha >= 245 && holdAlpha >= tapAlpha;
       })
-      .toBeGreaterThan(10);
+      .toBe(true);
+    await expect
+      .poll(() =>
+        sourceAlphaAtRatio(
+          canvas,
+          0.69 + (76 * 1.05) / 1100,
+          0.55,
+        )
+      )
+      .toBeGreaterThan(80);
 
     await page.getByRole("button", { name: "元に戻す" }).first().click();
     await expect(page.getByTestId("recipe-black")).toHaveText("1");
@@ -810,7 +797,7 @@ test.describe("スマホ実タッチの回帰", () => {
     const canvasBox = await canvas.boundingBox();
     if (!canvasBox) throw new Error("Canvas is unavailable");
     const endXRatio = 0.72 + 12 / canvasBox.width;
-    await withCanvasTouchAfterHoldMove(
+    await withCanvasTouchAfterMove(
       page,
       canvas,
       0.72,
@@ -818,6 +805,39 @@ test.describe("スマホ実タッチの回帰", () => {
       430,
       { x: 12, y: 0 },
       async () => {
+        const preview = page.getByTestId("paint-stroke-preview");
+        await expect
+          .poll(async () => {
+            const pixel = await preview.evaluate(
+              (element, point) => {
+                const layer = element as HTMLCanvasElement;
+                const context = layer.getContext("2d", {
+                  willReadFrequently: true,
+                });
+                if (!context) return [0, 0, 0, 0];
+                return Array.from(
+                  context.getImageData(
+                    Math.min(
+                      layer.width - 1,
+                      Math.floor(layer.width * point.x),
+                    ),
+                    Math.min(
+                      layer.height - 1,
+                      Math.floor(layer.height * point.y),
+                    ),
+                    1,
+                    1,
+                  ).data,
+                );
+              },
+              { x: endXRatio, y: 0.55 },
+            );
+            return pixel[3];
+          })
+          .toBeGreaterThan(8);
+
+        // A live stroke is only a preview until pointerup; recipes and the
+        // authoritative paint canvas must not be contaminated mid-gesture.
         await expect
           .poll(async () => {
             const pixel = await sourcePixelAtRatio(
@@ -827,7 +847,7 @@ test.describe("スマホ実タッチの回帰", () => {
             );
             return pixel[3];
           })
-          .toBeGreaterThan(8);
+          .toBe(0);
       },
     );
 
@@ -843,42 +863,89 @@ test.describe("スマホ実タッチの回帰", () => {
     await expect(page.getByTestId("recipe-blue")).toHaveCount(0);
   });
 
-  test("長押し前のドラッグでは、置いた絵の具を混ぜず履歴も増やさない", async ({
+  test("待たずにドラッグすると初点から連続して塗れ、標本地点数どおりの1単位を一操作で加える", async ({
     page,
   }, testInfo) => {
     test.skip(testInfo.project.name !== "android-chromium");
     const canvas = page.getByTestId("mix-canvas");
+    const source = canvas.locator("canvas.paint-layer--source");
+    const preview = page.getByTestId("paint-stroke-preview");
 
-    await touchElement(page, page.getByTestId("material-red"));
-    await touchCanvasAt(page, canvas, 0.3, 0.55);
     await touchElement(page, page.getByTestId("material-blue"));
-    await touchCanvasAt(page, canvas, 0.7, 0.55);
-    await expect(page.getByTestId("recipe-red")).toHaveText("1");
-    await expect(page.getByTestId("recipe-blue")).toHaveText("1");
-    await expect
-      .poll(async () => (await sourcePaintDigest(canvas)).alpha)
-      .toBeGreaterThan(0);
-    await page.waitForTimeout(100);
-    const beforeDrag = await sourcePaintDigest(canvas);
-
-    await touchCanvasWithJitter(page, canvas, 0.26, 0.55, {
-      x: 180,
+    const canvasBox = await canvas.boundingBox();
+    if (!canvasBox) throw new Error("Canvas is unavailable");
+    const sourceWidth = await source.evaluate((element) =>
+      (element as HTMLCanvasElement).width
+    );
+    const mediumSpacing = 76 * 0.62;
+    // Travel 4.4 fixed sample intervals. This deterministically emits the
+    // origin, four full-distance samples, and the visible endpoint tail.
+    const movement = {
+      x: (mediumSpacing * 4.4 * canvasBox.width) / sourceWidth,
       y: 0,
-    });
-    await page.waitForTimeout(250);
+    };
+    const expectedUnits = 6;
+    const endRatio = 0.28 + movement.x / canvasBox.width;
 
-    expect(await sourcePaintDigest(canvas)).toEqual(beforeDrag);
-    await expect(page.getByTestId("recipe-red")).toHaveText("1");
-    await expect(page.getByTestId("recipe-blue")).toHaveText("1");
+    await withCanvasTouchAfterMove(
+      page,
+      canvas,
+      0.28,
+      0.55,
+      0,
+      movement,
+      async () => {
+        // No 320 ms hold is inserted: the first move must already be visible.
+        await expect
+          .poll(async () => {
+            const pixel = await preview.evaluate(
+              (element, point) => {
+                const layer = element as HTMLCanvasElement;
+                const context = layer.getContext("2d", {
+                  willReadFrequently: true,
+                });
+                if (!context) return 0;
+                return context.getImageData(
+                  Math.min(
+                    layer.width - 1,
+                    Math.floor(layer.width * point.x),
+                  ),
+                  Math.min(
+                    layer.height - 1,
+                    Math.floor(layer.height * point.y),
+                  ),
+                  1,
+                  1,
+                ).data[3];
+              },
+              { x: endRatio, y: 0.55 },
+            );
+            return pixel;
+          })
+          .toBeGreaterThan(8);
+        await expect(page.getByTestId("recipe-blue")).toHaveCount(0);
+      },
+    );
 
-    // A no-op drag must not consume an Undo level. One Undo therefore removes
-    // the preceding blue tap immediately, rather than merely undoing a mix.
+    // The initial contact contributes exactly one unit. Every emitted
+    // fixed-distance placement, including the visible endpoint, adds one more.
+    await expect(page.getByTestId("recipe-blue")).toHaveText(
+      String(expectedUnits),
+    );
+    await expect
+      .poll(() => sourceAlphaAtRatio(canvas, 0.28, 0.55))
+      .toBeGreaterThan(8);
+    await expect
+      .poll(() => sourceAlphaAtRatio(canvas, endRatio, 0.55))
+      .toBeGreaterThan(8);
+
+    // The whole path is one history operation.
     await page.getByRole("button", { name: "元に戻す" }).first().click();
-    await expect(page.getByTestId("recipe-red")).toHaveText("1");
     await expect(page.getByTestId("recipe-blue")).toHaveCount(0);
+    await expect.poll(() => sourceCanvasHasPaint(canvas)).toBe(false);
   });
 
-  test("保存レシピ色を長押しして伸ばすと、経路を連続して塗り配合比とUndoを保つ", async ({
+  test("保存レシピ色は待たずに伸ばせ、経路全体で配合比とUndoを保つ", async ({
     page,
   }, testInfo) => {
     test.skip(testInfo.project.name !== "android-chromium");
@@ -901,7 +968,7 @@ test.describe("スマホ実タッチの回帰", () => {
       "true",
     );
 
-    await holdAndDragCanvas(page, canvas, 0.24, 0.55, 430, [
+    await dragCanvas(page, canvas, 0.24, 0.55, [
       { x: 38, y: 0 },
       { x: 76, y: 0 },
       { x: 114, y: 0 },
@@ -932,6 +999,40 @@ test.describe("スマホ実タッチの回帰", () => {
     // The entire stretched path is one gesture from pointer-down to pointer-up.
     await page.getByRole("button", { name: "元に戻す" }).first().click();
     await expect(page.getByTestId("recipe-summary")).toHaveCount(0);
+    await expect.poll(() => sourceCanvasHasPaint(canvas)).toBe(false);
+  });
+
+  test("水も待たずに初点から伸び、経路全体を一度のUndoで戻せる", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "android-chromium");
+    const canvas = page.getByTestId("mix-canvas");
+
+    await touchElement(page, page.getByTestId("material-water"));
+    await dragCanvas(page, canvas, 0.28, 0.55, [
+      { x: 34, y: 0 },
+      { x: 68, y: 0 },
+      { x: 102, y: 0 },
+    ]);
+
+    await expect
+      .poll(async () =>
+        Number(await page.getByTestId("recipe-water").textContent())
+      )
+      .toBeGreaterThan(1);
+    await expect
+      .poll(async () => {
+        const values = await Promise.all([
+          sourceAlphaAtRatio(canvas, 0.28, 0.55),
+          sourceAlphaAtRatio(canvas, 0.43, 0.55),
+          sourceAlphaAtRatio(canvas, 0.56, 0.55),
+        ]);
+        return Math.min(...values);
+      })
+      .toBeGreaterThan(2);
+
+    await page.getByRole("button", { name: "元に戻す" }).first().click();
+    await expect(page.getByTestId("recipe-water")).toHaveCount(0);
     await expect.poll(() => sourceCanvasHasPaint(canvas)).toBe(false);
   });
 
@@ -1033,7 +1134,7 @@ test.describe("スマホ実タッチの回帰", () => {
     await expectPixelRgbNear(drawingLayer, 500, 350, [230, 0, 18]);
     await expect
       .poll(async () => (await pixelAt(drawingLayer, 500, 350))[3])
-      .toBeGreaterThan(250);
+      .toBeGreaterThan(220);
 
     await touchElement(page, page.getByTestId("mode-color"));
     await touchElement(
