@@ -29,6 +29,7 @@ import {
   paintStepRecipe,
   primaryMaterialForRecipe,
 } from "../lib/paintSteps";
+import { MAX_MIXER_STROKE_POINTS } from "../lib/strokeSampling";
 import {
   MAX_RECIPE_UNITS_PER_MATERIAL,
   MAX_TOTAL_RECIPE_UNITS,
@@ -160,7 +161,7 @@ function normalizeStretchPoints(
       (point) =>
         Number.isFinite(point.x) && Number.isFinite(point.y),
     )
-    .slice(0, 80)
+    .slice(0, MAX_MIXER_STROKE_POINTS)
     .map((point) => ({
       x: Math.min(1, Math.max(0, point.x)),
       y: Math.min(1, Math.max(0, point.y)),
@@ -624,7 +625,7 @@ export default function ColorRecipeApp() {
     if (!placements.length) return false;
     const safeOriginDeposit = Math.min(
       8,
-      Math.max(2, Math.trunc(originDeposit)),
+      Math.max(1, Math.trunc(originDeposit)),
     );
     const safeWaveSeed = Number.isFinite(waveSeed)
       ? Math.min(1, Math.max(0, waveSeed))
@@ -657,7 +658,10 @@ export default function ColorRecipeApp() {
             id: createId("stretch-origin"),
             material,
             deposit: safeOriginDeposit,
-            shape: "hold" as const,
+            shape:
+              safeOriginDeposit > 1
+                ? ("hold" as const)
+                : ("tap" as const),
             waveSeed: safeWaveSeed,
             size,
             x: placements[0].x,
@@ -679,7 +683,7 @@ export default function ColorRecipeApp() {
       };
     });
     setAnnouncement(
-      `${MATERIAL_LABELS[material]}を長押しから${placements.length}地点へ伸ばし、${totalUnits}単位追加しました`,
+      `${MATERIAL_LABELS[material]}を${placements.length}地点へ伸ばし、${totalUnits}単位追加しました`,
     );
     return true;
   };
@@ -822,7 +826,7 @@ export default function ColorRecipeApp() {
     if (!placements.length) return false;
     const safeOriginDeposit = Math.min(
       8,
-      Math.max(2, Math.trunc(originDeposit)),
+      Math.max(1, Math.trunc(originDeposit)),
     );
     const safeWaveSeed = Number.isFinite(waveSeed)
       ? Math.min(1, Math.max(0, waveSeed))
@@ -864,7 +868,10 @@ export default function ColorRecipeApp() {
             material,
             recipe: { ...batchRecipe },
             deposit: safeOriginDeposit,
-            shape: "hold" as const,
+            shape:
+              safeOriginDeposit > 1
+                ? ("hold" as const)
+                : ("tap" as const),
             waveSeed: safeWaveSeed,
             size,
             x: placements[0].x,
@@ -888,7 +895,7 @@ export default function ColorRecipeApp() {
     });
     markColorAsRecent(color.id);
     setAnnouncement(
-      `保存色「${color.name}」を長押しから${placements.length}地点へ伸ばし、元の配合を${batchCount}バッチ追加しました`,
+      `保存色「${color.name}」を${placements.length}地点へ伸ばし、元の配合を${batchCount}バッチ追加しました`,
     );
     return true;
   };
@@ -1491,8 +1498,8 @@ export default function ColorRecipeApp() {
               <li>
                 <span>3</span>
                 <div>
-                  <strong>長押しして色を伸ばす</strong>
-                  <p>選んだ色を長押ししたまま動かすと、配合を保って波状に伸びます。</p>
+                  <strong>そのまま動かして色を伸ばす</strong>
+                  <p>選んだ色に触れたまま動かすと、待たずに配合を保って波状に伸びます。</p>
                 </div>
               </li>
             </ol>
