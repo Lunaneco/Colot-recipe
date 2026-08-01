@@ -55,8 +55,11 @@ import {
   type StrokePoint,
   type StrokeSamplerState,
 } from "../lib/strokeSampling";
-import { rgbToHex, rgbToHsl } from "../lib/colorScience";
-import { paintStepUnits } from "../lib/paintSteps";
+import { mixPaint, rgbToHex, rgbToHsl } from "../lib/colorScience";
+import {
+  paintStepUnits,
+  primaryMaterialForRecipe,
+} from "../lib/paintSteps";
 import { RecipeInspector } from "./RecipeInspector";
 
 type MixerState = {
@@ -149,6 +152,13 @@ type ActivePointerSelection = {
   eraser: boolean;
 };
 
+type LiveCanvasRequest = {
+  selection: ActivePointerSelection;
+  path: Array<{ x: number; y: number }>;
+  originDeposit: number;
+  waveSeed: number;
+};
+
 type PointerSample = Pick<
   PointerEvent,
   "clientX" | "clientY" | "pressure" | "pointerType" | "timeStamp"
@@ -228,6 +238,84 @@ const materialButtons: Array<{
 
 const isMaterialTool = (tool: MixerTool): tool is MaterialId =>
   (MATERIAL_IDS as readonly MixerTool[]).includes(tool);
+
+function recipePreviewForSelection(
+  baseRecipe: RecipeUnits,
+  selection: ActivePointerSelection,
+  batchCount: number,
+): RecipeUnits | undefined {
+  if (selection.eraser || selection.material === "picker") return undefined;
+  const safeBatchCount = Math.max(1, Math.trunc(batchCount));
+  return Object.fromEntries(
+    MATERIAL_IDS.map((material) => {
+      const perBatch = selection.recipeColor
+        ? selection.recipeColor.recipe[material]
+        : selection.material === material
+          ? 1
+          : 0;
+      return [material, baseRecipe[material] + perBatch * safeBatchCount];
+    }),
+  ) as RecipeUnits;
+}
+
+function liveStepsForSelection(
+  selection: ActivePointerSelection,
+  path: ReadonlyArray<{ x: number; y: number }>,
+  originDeposit: number,
+  waveSeed: number,
+): PaintStep[] {
+  if (
+    path.length === 0 ||
+    selection.eraser ||
+    selection.material === "picker"
+  ) {
+    return [];
+  }
+  const material = selection.recipeColor
+    ? primaryMaterialForRecipe(selection.recipeColor.recipe)
+    : isMaterialTool(selection.material)
+      ? selection.material
+      : undefined;
+  if (!material) return [];
+
+  const safeOriginDeposit = Math.min(
+    HOLD_MAX_DEPOSIT,
+    Math.max(1, Math.trunc(originDeposit)),
+  );
+  const safeWaveSeed = Number.isFinite(waveSeed)
+    ? Math.min(1, Math.max(0, waveSeed))
+    : 0;
+  const recipe = selection.recipeColor?.recipe;
+  const createdAt = "1970-01-01T00:00:00.000Z";
+  const makeRecipe = () => (recipe ? { ...recipe } : undefined);
+
+  return [
+    {
+      id: "live-preview-origin",
+      material,
+      recipe: makeRecipe(),
+      deposit: safeOriginDeposit,
+      shape: safeOriginDeposit > 1 ? "hold" : "tap",
+      waveSeed: safeWaveSeed,
+      size: selection.size,
+      x: path[0].x,
+      y: path[0].y,
+      createdAt,
+    },
+    ...path.slice(1).map((point, index) => ({
+      id: `live-preview-stroke-${index}`,
+      material,
+      recipe: makeRecipe(),
+      shape: "stroke" as const,
+      waveSeed:
+        (safeWaveSeed + (index + 1) * 0.618_033_988_75) % 1,
+      size: selection.size,
+      x: point.x,
+      y: point.y,
+      createdAt,
+    })),
+  ];
+}
 
 function hashNoise(seed: number) {
   const value = Math.sin(seed * 12.9898) * 43758.5453;
@@ -356,6 +444,19 @@ function drawPaintDab(
   context.restore();
 }
 
+type SpatialFieldBuffer = {
+  canvas: HTMLCanvasElement;
+  context: CanvasRenderingContext2D;
+  pixels: ImageData;
+  width: number;
+  height: number;
+};
+
+const spatialFieldBuffers = new WeakMap<
+  CanvasRenderingContext2D,
+  SpatialFieldBuffer
+>();
+
 function drawSpatialMixField(
   context: CanvasRenderingContext2D,
   state: MixerState,
@@ -374,12 +475,29 @@ function drawSpatialMixField(
     96,
     Math.round(fieldWidth / aspectRatio),
   );
-  const field = document.createElement("canvas");
-  field.width = fieldWidth;
-  field.height = fieldHeight;
-  const fieldContext = field.getContext("2d");
-  if (!fieldContext) return;
-  const pixels = fieldContext.createImageData(fieldWidth, fieldHeight);
+  let buffer = spatialFieldBuffers.get(context);
+  if (
+    !buffer ||
+    buffer.width !== fieldWidth ||
+    buffer.height !== fieldHeight
+  ) {
+    const field = buffer?.canvas ?? document.createElement("canvas");
+    field.width = fieldWidth;
+    field.height = fieldHeight;
+    const fieldContext = field.getContext("2d");
+    if (!fieldContext) return;
+    buffer = {
+      canvas: field,
+      context: fieldContext,
+      pixels: fieldContext.createImageData(fieldWidth, fieldHeight),
+      width: fieldWidth,
+      height: fieldHeight,
+    };
+    spatialFieldBuffers.set(context, buffer);
+  } else {
+    buffer.pixels.data.fill(0);
+  }
+  const { canvas: field, context: fieldContext, pixels } = buffer;
   const colourCache = new Map<string, SpatialPaintSample["mixed"]>();
   const sample = createSpatialPaintSampler(state, {
     width: CANVAS_WIDTH,
@@ -413,16 +531,21 @@ function drawSpatialMixField(
           (sampledPixel.coverage * (1 - dryBody) +
             bodyCoverage *
               (0.86 + 0.14 * sampledPixel.coverage) *
-              dryBody),
+          dryBody),
         ),
       );
+      // The spatial kernel describes how a dab reaches its edge; it must not
+      // dilute undisturbed tube paint a second time. Keep the dry body dense,
+      // then hand alpha control back to the exact local concentration as soon
+      // as water is present.
+      const renderedOpacity =
+        sampledPixel.mixed.opacity * (1 - dryBody) +
+        Math.max(0.98, sampledPixel.mixed.opacity) * dryBody;
       pixels.data[offset] = sampledPixel.mixed.rgb.r;
       pixels.data[offset + 1] = sampledPixel.mixed.rgb.g;
       pixels.data[offset + 2] = sampledPixel.mixed.rgb.b;
       pixels.data[offset + 3] = Math.round(
-        renderedCoverage *
-          sampledPixel.mixed.opacity *
-          255,
+        renderedCoverage * renderedOpacity * 255,
       );
     }
   }
@@ -433,6 +556,22 @@ function drawSpatialMixField(
   context.globalCompositeOperation = "source-over";
   context.drawImage(field, 0, 0, CANVAS_WIDTH, canvasHeight);
   context.restore();
+}
+
+function drawMixerState(
+  canvas: HTMLCanvasElement,
+  state: MixerState,
+  canvasHeight: number,
+) {
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  context.clearRect(0, 0, CANVAS_WIDTH, canvasHeight);
+  drawSpatialMixField(context, state, canvasHeight);
+  state.steps.forEach((step, index) => {
+    if (paintStepUnits(step, "water") > 0) {
+      drawPaintDab(context, step, index, canvasHeight);
+    }
+  });
 }
 
 export function MixingStudio({
@@ -479,6 +618,21 @@ export function MixingStudio({
   );
   const sampleFrameRef = useRef<number | undefined>(undefined);
   const gestureClearFrameRef = useRef<number | undefined>(undefined);
+  const liveCanvasFrameRef = useRef<number | undefined>(undefined);
+  const pendingLiveCanvasRef = useRef<LiveCanvasRequest | undefined>(
+    undefined,
+  );
+  const lastLiveCanvasRequestRef = useRef<LiveCanvasRequest | undefined>(
+    undefined,
+  );
+  const clearGesturePreviewRef = useRef<() => void>(() => undefined);
+  const paintLiveCanvasPreviewRef = useRef<
+    (request: LiveCanvasRequest) => void
+  >(() => undefined);
+  const authoritativeRedrawCompleteRef = useRef<() => void>(
+    () => undefined,
+  );
+  const commitPreviewClearPendingRef = useRef(false);
   const holdFrameRef = useRef<number | undefined>(undefined);
   const holdStartedAtRef = useRef<number | undefined>(undefined);
   const holdDepositRef = useRef(1);
@@ -490,16 +644,29 @@ export function MixingStudio({
   const activePointerSelection = useRef<
     ActivePointerSelection | undefined
   >(undefined);
+  const liveRecipeBaseRef = useRef<RecipeUnits | undefined>(undefined);
+  const liveCanvasBaseRef = useRef<MixerState | undefined>(undefined);
+  const authoritativeStateAtGestureStartRef = useRef<
+    MixerState | undefined
+  >(undefined);
   const [webglReady, setWebglReady] = useState(false);
   const [canvasHeight, setCanvasHeight] = useState(DEFAULT_CANVAS_HEIGHT);
   const [samplePoint, setSamplePoint] = useState<{ x: number; y: number }>();
   const [sampledPaint, setSampledPaint] = useState<SpatialPaintSample>();
   const [holdPreview, setHoldPreview] = useState<HoldPreview>();
+  const [liveRecipePreview, setLiveRecipePreview] = useState<RecipeUnits>();
+  const [liveCanvasPreviewActive, setLiveCanvasPreviewActive] =
+    useState(false);
   const isPicker = !selectedRecipeColor && selectedMaterial === "picker";
   const isWater = !selectedRecipeColor && selectedMaterial === "water";
   const isEraser = !selectedRecipeColor && selectedMaterial === "eraser";
   const activeSampledPaint =
     isPicker ? sampledPaint : undefined;
+  const displayedRecipe = liveRecipePreview ?? state.recipe;
+  const displayedMixed = useMemo(
+    () => liveRecipePreview ? mixPaint(liveRecipePreview) : mixed,
+    [liveRecipePreview, mixed],
+  );
   const pigmentUnits = useMemo(
     () =>
       PIGMENT_IDS.reduce(
@@ -537,6 +704,71 @@ export function MixingStudio({
         ? `スポイト結果。透明な水。水分量${Math.round(activeSampledPaint.waterRatio * 100)}パーセント。`
         : "スポイト結果。この場所には絵の具がありません。";
   }, [activeSampledPaint]);
+
+  const updateLiveRecipePreview = useCallback(
+    (selection: ActivePointerSelection, batchCount: number) => {
+      const baseRecipe = liveRecipeBaseRef.current;
+      if (!baseRecipe) return;
+      setLiveRecipePreview(
+        recipePreviewForSelection(baseRecipe, selection, batchCount),
+      );
+    },
+    [],
+  );
+
+  const clearLiveRecipePreview = useCallback(() => {
+    liveRecipeBaseRef.current = undefined;
+    setLiveRecipePreview(undefined);
+  }, []);
+
+  useEffect(() => {
+    const startedSelection = activePointerSelection.current;
+    if (!startedSelection) return;
+    const selectionIsUnchanged =
+      startedSelection.material === selectedMaterial &&
+      startedSelection.recipeColorId === selectedRecipeColor?.id &&
+      startedSelection.size === size;
+    if (!selectionIsUnchanged) {
+      gestureCancelled.current = true;
+      if (holdFrameRef.current) {
+        window.cancelAnimationFrame(holdFrameRef.current);
+        holdFrameRef.current = undefined;
+      }
+      holdStartedAtRef.current = undefined;
+      holdDepositRef.current = 1;
+      setHoldPreview(undefined);
+      clearLiveRecipePreview();
+      clearGesturePreviewRef.current();
+    }
+  }, [
+    clearLiveRecipePreview,
+    selectedMaterial,
+    selectedRecipeColor?.id,
+    size,
+  ]);
+
+  useEffect(() => {
+    if (
+      !activePointerSelection.current ||
+      !authoritativeStateAtGestureStartRef.current ||
+      authoritativeStateAtGestureStartRef.current === state
+    ) {
+      return;
+    }
+    // Keyboard Undo/Redo or another authoritative edit can occur while a
+    // pointer is still captured. Never commit a gesture built from the stale
+    // palette over that newer state.
+    gestureCancelled.current = true;
+    if (holdFrameRef.current) {
+      window.cancelAnimationFrame(holdFrameRef.current);
+      holdFrameRef.current = undefined;
+    }
+    holdStartedAtRef.current = undefined;
+    holdDepositRef.current = 1;
+    setHoldPreview(undefined);
+    clearLiveRecipePreview();
+    clearGesturePreviewRef.current();
+  }, [clearLiveRecipePreview, state]);
 
   useEffect(() => {
     const surface = paintSurface.current;
@@ -628,6 +860,12 @@ export function MixingStudio({
         { width: CANVAS_WIDTH, height: canvasHeight },
       );
       const pixel = readRenderedPixel(point);
+      const renderedAlpha = pixel
+        ? Math.round((pixel[3] / 255) * 1_000) / 1_000
+        : undefined;
+      if (pixel) {
+        sample.renderedAlpha = renderedAlpha;
+      }
       if (pixel && pixel[3] > 0) {
         const rgb = { r: pixel[0], g: pixel[1], b: pixel[2] };
         sample.mixed = {
@@ -635,7 +873,7 @@ export function MixingStudio({
           hex: rgbToHex(rgb),
           rgb,
           hsl: rgbToHsl(rgb),
-          opacity: Math.round((pixel[3] / 255) * 1_000) / 1_000,
+          opacity: renderedAlpha ?? 0,
         };
       }
       setSampledPaint(sample);
@@ -680,16 +918,12 @@ export function MixingStudio({
   const redraw = useCallback(() => {
     const canvas = paintCanvas.current;
     if (!canvas) return;
-    const context = canvas.getContext("2d");
-    if (!context) return;
-    context.clearRect(0, 0, CANVAS_WIDTH, canvasHeight);
-    drawSpatialMixField(context, state, canvasHeight);
-    state.steps.forEach((step, index) => {
-      if (paintStepUnits(step, "water") > 0) {
-        drawPaintDab(context, step, index, canvasHeight);
-      }
-    });
+    drawMixerState(canvas, state, canvasHeight);
+    if (textureRef.current && textureRef.current.image !== canvas) {
+      textureRef.current.image = canvas;
+    }
     updateTexture();
+    authoritativeRedrawCompleteRef.current();
   }, [canvasHeight, state, updateTexture]);
 
   useEffect(() => {
@@ -713,6 +947,9 @@ export function MixingStudio({
       }
       if (gestureClearFrameRef.current) {
         window.cancelAnimationFrame(gestureClearFrameRef.current);
+      }
+      if (liveCanvasFrameRef.current) {
+        window.cancelAnimationFrame(liveCanvasFrameRef.current);
       }
     },
     [],
@@ -881,120 +1118,158 @@ export function MixingStudio({
     };
   };
 
+  const finishGesturePreviewClear = () => {
+    const canvas = gesturePreviewCanvas.current;
+    const context = canvas?.getContext("2d");
+    if (canvas && context) {
+      context.clearRect(0, 0, canvas.width, canvas.height);
+    }
+    pendingLiveCanvasRef.current = undefined;
+    lastLiveCanvasRequestRef.current = undefined;
+    liveCanvasBaseRef.current = undefined;
+    authoritativeStateAtGestureStartRef.current = undefined;
+    commitPreviewClearPendingRef.current = false;
+    const source = paintCanvas.current;
+    if (textureRef.current && source) {
+      textureRef.current.image = source;
+      textureRef.current.needsUpdate = true;
+      renderRef.current?.();
+    }
+    setLiveCanvasPreviewActive(false);
+  };
+
   const clearGesturePreview = () => {
     if (gestureClearFrameRef.current) {
       window.cancelAnimationFrame(gestureClearFrameRef.current);
       gestureClearFrameRef.current = undefined;
     }
-    const canvas = gesturePreviewCanvas.current;
-    const context = canvas?.getContext("2d");
-    if (!canvas || !context) return;
-    context.clearRect(0, 0, canvas.width, canvas.height);
+    if (liveCanvasFrameRef.current) {
+      window.cancelAnimationFrame(liveCanvasFrameRef.current);
+      liveCanvasFrameRef.current = undefined;
+    }
+    pendingLiveCanvasRef.current = undefined;
+    finishGesturePreviewClear();
   };
+
+  useEffect(() => {
+    clearGesturePreviewRef.current = clearGesturePreview;
+    authoritativeRedrawCompleteRef.current = () => {
+      if (!commitPreviewClearPendingRef.current) return;
+      if (gestureClearFrameRef.current) {
+        window.cancelAnimationFrame(gestureClearFrameRef.current);
+      }
+      // updateTexture queued the WebGL render immediately before this
+      // callback. Reveal the authoritative layers only after that render has
+      // completed, rather than after an arbitrary fixed frame count.
+      gestureClearFrameRef.current = window.requestAnimationFrame(() => {
+        gestureClearFrameRef.current = undefined;
+        if (commitPreviewClearPendingRef.current) {
+          finishGesturePreviewClear();
+        }
+      });
+    };
+  });
 
   const clearGesturePreviewAfterCommit = () => {
     if (gestureClearFrameRef.current) {
       window.cancelAnimationFrame(gestureClearFrameRef.current);
     }
+    if (liveCanvasFrameRef.current) {
+      window.cancelAnimationFrame(liveCanvasFrameRef.current);
+      liveCanvasFrameRef.current = undefined;
+    }
+    pendingLiveCanvasRef.current = undefined;
+    commitPreviewClearPendingRef.current = true;
     // Keep the live paint visible until React has committed and redrawn the
-    // authoritative canvas. Two frames avoid a blank flash on WebKit where
-    // passive effects can land after the first animation callback.
+    // authoritative canvas. The two-frame branch is only a fallback for a
+    // rejected addition that produces no new authoritative state/redraw.
     gestureClearFrameRef.current = window.requestAnimationFrame(() => {
       gestureClearFrameRef.current = window.requestAnimationFrame(() => {
         gestureClearFrameRef.current = undefined;
-        const canvas = gesturePreviewCanvas.current;
-        const context = canvas?.getContext("2d");
-        if (canvas && context) {
-          context.clearRect(0, 0, canvas.width, canvas.height);
+        if (commitPreviewClearPendingRef.current) {
+          finishGesturePreviewClear();
         }
       });
     });
   };
 
-  const previewStretch = (path: readonly StrokePoint[]) => {
+  const paintLiveCanvasPreview = (request: LiveCanvasRequest) => {
     const canvas = gesturePreviewCanvas.current;
-    const context = canvas?.getContext("2d");
-    if (!canvas || !context) return;
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    if (path.length === 0) return;
-
-    const startedSelection = activePointerSelection.current;
-    const selectedColor = startedSelection?.previewColor;
-    if (!startedSelection || !selectedColor) return;
-    const radius = sizeRadius[startedSelection.size];
-    const first = path[0];
-    const current = path[path.length - 1];
-    const startX = first.x * CANVAS_WIDTH;
-    const startY = first.y * canvasHeight;
-    const endX = current.x * CANVAS_WIDTH;
-    const endY = current.y * canvasHeight;
-
-    const tracePath = () => {
-      context.beginPath();
-      context.moveTo(startX, startY);
-      for (let index = 1; index < path.length; index += 1) {
-        context.lineTo(
-          path[index].x * CANVAS_WIDTH,
-          path[index].y * canvasHeight,
-        );
-      }
+    const baseState = liveCanvasBaseRef.current;
+    if (!canvas || !baseState || request.path.length === 0) return;
+    lastLiveCanvasRequestRef.current = {
+      ...request,
+      path: request.path.map(({ x, y }) => ({ x, y })),
     };
-
-    context.save();
-    context.lineCap = "round";
-    context.lineJoin = "round";
-    tracePath();
-    if (startedSelection.water) {
-      context.globalCompositeOperation = "screen";
-      context.strokeStyle = "rgba(106, 176, 190, 0.24)";
-      context.lineWidth = radius * 2 * 1.42;
-      context.stroke();
-      if (path.length === 1) {
-        context.fillStyle = "rgba(106, 176, 190, 0.24)";
-        context.beginPath();
-        context.arc(endX, endY, radius * 1.42, 0, Math.PI * 2);
-        context.fill();
-      }
-    } else {
-      // This is a placement preview, not a mix preview. Keep the selected
-      // paint visually dominant even when the path crosses an existing mix.
-      context.globalCompositeOperation = "source-over";
-      context.strokeStyle = hexToRgba(selectedColor, 0.95);
-      context.lineWidth = radius * 1.9;
-      context.stroke();
-      tracePath();
-      context.strokeStyle = hexToRgba(selectedColor, 0.995);
-      context.lineWidth = radius * 1.12;
-      context.stroke();
+    const liveSteps = liveStepsForSelection(
+      request.selection,
+      request.path,
+      request.originDeposit,
+      request.waveSeed,
+    );
+    if (liveSteps.length === 0) return;
+    const batchCount =
+      Math.max(1, Math.trunc(request.originDeposit)) +
+      request.path.length -
+      1;
+    const liveRecipe =
+      recipePreviewForSelection(
+        baseState.recipe,
+        request.selection,
+        batchCount,
+      ) ?? baseState.recipe;
+    drawMixerState(
+      canvas,
+      {
+        recipe: liveRecipe,
+        steps: [...baseState.steps, ...liveSteps],
+        mixGestures: baseState.mixGestures,
+      },
+      canvasHeight,
+    );
+    if (textureRef.current) {
+      // Use the same wet-paint shader for the transient raster. Rendering it
+      // synchronously keeps the very first contact visible without one frame
+      // of stale gloss from the authoritative palette.
+      textureRef.current.image = canvas;
+      textureRef.current.needsUpdate = true;
+      renderRef.current?.();
     }
+    setLiveCanvasPreviewActive(true);
+  };
 
-    if (!startedSelection.water) {
-      const phase =
-        hashNoise(
-          holdSeedRef.current * 1_337 +
-            current.x * 1_913 +
-            current.y * 2_539 +
-            path.length * 0.618,
-        ) *
-        Math.PI *
-        2;
-      context.fillStyle = hexToRgba(selectedColor, 0.98);
-      context.beginPath();
-      for (let index = 0; index <= 28; index += 1) {
-        const angle = (index / 28) * Math.PI * 2;
-        const wave =
-          0.92 +
-          Math.sin(angle * 6 + phase) * 0.055 +
-          Math.sin(angle * 11 - phase * 0.7) * 0.025;
-        const x = endX + Math.cos(angle) * radius * wave;
-        const y = endY + Math.sin(angle) * radius * wave;
-        if (index === 0) context.moveTo(x, y);
-        else context.lineTo(x, y);
-      }
-      context.closePath();
-      context.fill();
-    }
-    context.restore();
+  useEffect(() => {
+    paintLiveCanvasPreviewRef.current = paintLiveCanvasPreview;
+  });
+
+  useEffect(() => {
+    const lastRequest = lastLiveCanvasRequestRef.current;
+    if (lastRequest) paintLiveCanvasPreviewRef.current(lastRequest);
+  }, [canvasHeight]);
+
+  const scheduleLiveCanvasPreview = (request: LiveCanvasRequest) => {
+    pendingLiveCanvasRef.current = {
+      ...request,
+      path: request.path.map(({ x, y }) => ({ x, y })),
+    };
+    if (liveCanvasFrameRef.current) return;
+    liveCanvasFrameRef.current = window.requestAnimationFrame(() => {
+      liveCanvasFrameRef.current = undefined;
+      const pending = pendingLiveCanvasRef.current;
+      pendingLiveCanvasRef.current = undefined;
+      if (pending) paintLiveCanvasPreviewRef.current(pending);
+    });
+  };
+
+  const previewStretch = (path: readonly StrokePoint[]) => {
+    const startedSelection = activePointerSelection.current;
+    if (!startedSelection || path.length === 0) return;
+    scheduleLiveCanvasPreview({
+      selection: startedSelection,
+      path: path.map(({ x, y }) => ({ x, y })),
+      originDeposit: stretchOriginDepositRef.current,
+      waveSeed: holdSeedRef.current,
+    });
   };
 
   const stopHoldPreview = () => {
@@ -1019,13 +1294,22 @@ export function MixingStudio({
     const role = startedSelection?.water ? "water" : "pigment";
     const color = startedSelection?.previewColor;
     if (!color) return;
-    const startedAt = performance.now();
+    const previewStartedAt = performance.now();
     const seed = hashNoise(
-      point.x * 997 + point.y * 619 + startedAt * 0.001,
+      point.x * 997 + point.y * 619 + previewStartedAt * 0.001,
     );
-    holdStartedAtRef.current = startedAt;
     holdDepositRef.current = 1;
     holdSeedRef.current = seed;
+    paintLiveCanvasPreview({
+      selection: startedSelection,
+      path: [point],
+      originDeposit: 1,
+      waveSeed: seed,
+    });
+    // Count hold time from the moment the first exact raster is available.
+    // Dense colour-field calculation can take part of a frame on a phone and
+    // must not silently turn a quick tap into a multi-unit long press.
+    holdStartedAtRef.current = performance.now();
     setHoldPreview({
       x: point.x,
       y: point.y,
@@ -1049,6 +1333,13 @@ export function MixingStudio({
       );
       if (deposit !== holdDepositRef.current) {
         holdDepositRef.current = deposit;
+        updateLiveRecipePreview(startedSelection, deposit);
+        paintLiveCanvasPreviewRef.current({
+          selection: startedSelection,
+          path: [point],
+          originDeposit: deposit,
+          waveSeed: seed,
+        });
         setHoldPreview({
           x: point.x,
           y: point.y,
@@ -1072,6 +1363,7 @@ export function MixingStudio({
       return;
     }
     if (activePointerId.current !== undefined) return;
+    clearGesturePreview();
     const startedSelection: ActivePointerSelection = {
       material: selectedMaterial,
       recipeColorId: selectedRecipeColor?.id,
@@ -1093,13 +1385,30 @@ export function MixingStudio({
     };
     activePointerId.current = event.pointerId;
     activePointerSelection.current = startedSelection;
+    authoritativeStateAtGestureStartRef.current = state;
+    if (
+      startedSelection.material === "picker" ||
+      startedSelection.eraser
+    ) {
+      clearLiveRecipePreview();
+    } else {
+      const baseRecipe = { ...state.recipe };
+      liveRecipeBaseRef.current = baseRecipe;
+      liveCanvasBaseRef.current = {
+        recipe: baseRecipe,
+        steps: state.steps,
+        mixGestures: state.mixGestures,
+      };
+      setLiveRecipePreview(
+        recipePreviewForSelection(baseRecipe, startedSelection, 1),
+      );
+    }
     event.currentTarget.setPointerCapture(event.pointerId);
     const surfaceRect =
       paintCanvas.current?.getBoundingClientRect() ??
       event.currentTarget.getBoundingClientRect();
     const point = toNormalizedPoint(event.nativeEvent, surfaceRect);
     pointerStroke.current = beginStrokeSampling(point);
-    clearGesturePreview();
     stretching.current = false;
     gestureCancelled.current = false;
     stretchOriginDepositRef.current = 1;
@@ -1185,6 +1494,10 @@ export function MixingStudio({
       samplingOptions,
     );
     previewStretch(preview.state.placements);
+    updateLiveRecipePreview(
+      startedSelection,
+      stretchOriginDepositRef.current + preview.state.placements.length - 1,
+    );
   };
 
   const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -1228,6 +1541,7 @@ export function MixingStudio({
     activePointerId.current = undefined;
     activePointerSelection.current = undefined;
     stopHoldPreview();
+    clearLiveRecipePreview();
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
@@ -1264,6 +1578,15 @@ export function MixingStudio({
       const stretchPoints = finished.state.placements.map(
         ({ x, y }) => ({ x, y }),
       );
+      // Coalesced pointer-up samples can add one last endpoint after the most
+      // recent move frame. Render that exact final transient state before the
+      // parent commit so the preview-to-authoritative handoff never jumps.
+      paintLiveCanvasPreview({
+        selection: startedSelection,
+        path: stretchPoints,
+        originDeposit: deposit,
+        waveSeed: holdSeedRef.current,
+      });
       const added = startedSelection.recipeColor
         ? onStretchRecipe(
             startedSelection.recipeColor,
@@ -1288,7 +1611,15 @@ export function MixingStudio({
         redraw();
       }
     } else if (startedSelection.recipeColor) {
-      clearGesturePreview();
+      // A release can cross the next long-press threshold between the last
+      // animation frame and pointerup. Paint the exact final deposit before
+      // committing so the visible and saved quantities never differ.
+      paintLiveCanvasPreview({
+        selection: startedSelection,
+        path: [{ x: tapPoint.x, y: tapPoint.y }],
+        originDeposit: deposit,
+        waveSeed: holdSeedRef.current,
+      });
       onAddRecipe(
         startedSelection.recipeColor,
         startedSelection.size,
@@ -1296,10 +1627,18 @@ export function MixingStudio({
         tapPoint.y,
         placement,
       );
+      clearGesturePreviewAfterCommit();
     } else {
-      clearGesturePreview();
-      if (startedSelection.eraser) onErase(tapPoint.x, tapPoint.y);
-      else if (isMaterialTool(startedSelection.material)) {
+      if (startedSelection.eraser) {
+        clearGesturePreview();
+        onErase(tapPoint.x, tapPoint.y);
+      } else if (isMaterialTool(startedSelection.material)) {
+        paintLiveCanvasPreview({
+          selection: startedSelection,
+          path: [{ x: tapPoint.x, y: tapPoint.y }],
+          originDeposit: deposit,
+          waveSeed: holdSeedRef.current,
+        });
         onAdd(
           startedSelection.material,
           startedSelection.size,
@@ -1307,6 +1646,9 @@ export function MixingStudio({
           tapPoint.y,
           placement,
         );
+        clearGesturePreviewAfterCommit();
+      } else {
+        clearGesturePreview();
       }
     }
     pointerStroke.current = undefined;
@@ -1333,7 +1675,10 @@ export function MixingStudio({
           <div className="paint-surface-shell">
             <div
               ref={paintSurface}
-              className={`paint-surface ${isPicker ? "is-sampling" : ""}`}
+              className={`paint-surface ${isPicker ? "is-sampling" : ""} ${
+                liveCanvasPreviewActive ? "is-live-preview" : ""
+              }`}
+              data-live-preview={liveCanvasPreviewActive ? "true" : "false"}
               role="application"
               tabIndex={0}
               aria-label={
@@ -1354,6 +1699,7 @@ export function MixingStudio({
                 activePointerId.current = undefined;
                 activePointerSelection.current = undefined;
                 stopHoldPreview();
+                clearLiveRecipePreview();
                 pointerStroke.current = undefined;
                 clearGesturePreview();
                 stretching.current = false;
@@ -1366,6 +1712,7 @@ export function MixingStudio({
                 activePointerId.current = undefined;
                 activePointerSelection.current = undefined;
                 stopHoldPreview();
+                clearLiveRecipePreview();
                 pointerStroke.current = undefined;
                 clearGesturePreview();
                 stretching.current = false;
@@ -1548,7 +1895,7 @@ export function MixingStudio({
                   </button>
                 ))}
               </div>
-              {state.steps.length === 0 && (
+              {state.steps.length === 0 && !liveCanvasPreviewActive && (
                 <div className="canvas-onboarding" aria-hidden="true">
                   <span className="onboarding-drop">
                     <Droplet size={28} />
@@ -1604,14 +1951,15 @@ export function MixingStudio({
         </section>
 
         <RecipeInspector
-          recipe={state.recipe}
-          mixed={mixed}
+          recipe={displayedRecipe}
+          mixed={displayedMixed}
           sampled={activeSampledPaint}
           sampling={isPicker}
           detailed={detailed}
           onToggleDetailed={onToggleDetailed}
           onClearSample={clearSample}
           onRegister={() => onRegisterColor(activeSampledPaint)}
+          registerDisabled={liveRecipePreview !== undefined}
         />
       </div>
 

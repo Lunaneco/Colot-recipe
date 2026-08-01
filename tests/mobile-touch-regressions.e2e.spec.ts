@@ -570,6 +570,66 @@ async function sourcePixelAtRatio(
     );
 }
 
+async function layerPixelAtRatio(
+  layer: Locator,
+  xRatio: number,
+  yRatio: number,
+) {
+  return layer.evaluate(
+    (element, point) => {
+      const canvas = element as HTMLCanvasElement;
+      const context = canvas.getContext("2d", {
+        willReadFrequently: true,
+      });
+      if (!context) throw new Error("2D canvas context is unavailable");
+      return Array.from(
+        context.getImageData(
+          Math.min(canvas.width - 1, Math.floor(canvas.width * point.x)),
+          Math.min(canvas.height - 1, Math.floor(canvas.height * point.y)),
+          1,
+          1,
+        ).data,
+      );
+    },
+    { x: xRatio, y: yRatio },
+  );
+}
+
+async function renderedScreenshotPixelAtRatio(
+  page: Page,
+  target: Locator,
+  xRatio: number,
+  yRatio: number,
+) {
+  const screenshot = await target.screenshot({ animations: "disabled" });
+  return page.evaluate(
+    async ({ base64, point }) => {
+      const image = new Image();
+      image.src = `data:image/png;base64,${base64}`;
+      await image.decode();
+      const decoded = document.createElement("canvas");
+      decoded.width = 1;
+      decoded.height = 1;
+      const context = decoded.getContext("2d");
+      if (!context) throw new Error("Screenshot canvas is unavailable");
+      const x = Math.min(
+        image.naturalWidth - 1,
+        Math.floor(image.naturalWidth * point.x),
+      );
+      const y = Math.min(
+        image.naturalHeight - 1,
+        Math.floor(image.naturalHeight * point.y),
+      );
+      context.drawImage(image, x, y, 1, 1, 0, 0, 1, 1);
+      return Array.from(context.getImageData(0, 0, 1, 1).data);
+    },
+    {
+      base64: screenshot.toString("base64"),
+      point: { x: xRatio, y: yRatio },
+    },
+  );
+}
+
 async function pixelAt(
   canvas: Locator,
   x: number,
@@ -751,6 +811,94 @@ test.describe("スマホ実タッチの回帰", () => {
     ).toBeLessThanOrEqual(1.5);
   });
 
+  test("Android実タッチは指を離す前から重なりの混色をキャンバスへ表示する", async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "android-chromium");
+    const canvas = page.getByTestId("mix-canvas");
+    const preview = page.getByTestId("paint-stroke-preview");
+    const point = { x: 0.72, y: 0.52 };
+
+    await touchElement(page, page.getByTestId("material-red"));
+    await touchCanvasAt(page, canvas, point.x, point.y);
+    await expect
+      .poll(async () =>
+        (await sourcePixelAtRatio(canvas, point.x, point.y)).slice(0, 3),
+      )
+      .toEqual([230, 0, 18]);
+    const committedRedPixel = await sourcePixelAtRatio(
+      canvas,
+      point.x,
+      point.y,
+    );
+    expect(committedRedPixel[3]).toBeGreaterThanOrEqual(240);
+
+    await touchElement(page, page.getByTestId("material-blue"));
+    let liveMixedPixel: number[] | undefined;
+    await withCanvasTouch(
+      page,
+      canvas,
+      point.x,
+      point.y,
+      async () => {
+        // A real touchStart must paint immediately. At the overlap this is the
+        // calibrated 1:1 mixture, not the raw selected blue (#00A1E9).
+        await expect
+          .poll(async () =>
+            (await layerPixelAtRatio(
+              preview,
+              point.x,
+              point.y,
+            )).slice(0, 3),
+          )
+          .toEqual([132, 96, 108]);
+        liveMixedPixel = await layerPixelAtRatio(
+          preview,
+          point.x,
+          point.y,
+        );
+        expect(liveMixedPixel[3]).toBeGreaterThanOrEqual(240);
+        expect(
+          await sourcePixelAtRatio(canvas, point.x, point.y),
+        ).toEqual(committedRedPixel);
+
+        const visiblePixel = await renderedScreenshotPixelAtRatio(
+          page,
+          canvas,
+          point.x,
+          point.y,
+        );
+        expect(
+          Math.max(
+            ...visiblePixel
+              .slice(0, 3)
+              .map((channel, index) =>
+                Math.abs(channel - [132, 96, 108][index])
+              ),
+          ),
+        ).toBeLessThanOrEqual(8);
+      },
+    );
+
+    expect(liveMixedPixel).toBeDefined();
+    await expect
+      .poll(async () =>
+        sourcePixelAtRatio(canvas, point.x, point.y)
+      )
+      .toEqual(liveMixedPixel);
+    await expect
+      .poll(async () =>
+        (await layerPixelAtRatio(
+          preview,
+          point.x,
+          point.y,
+        ))[3]
+      )
+      .toBe(0);
+    await expect(page.getByTestId("recipe-red")).toHaveText("1");
+    await expect(page.getByTestId("recipe-blue")).toHaveText("1");
+  });
+
   test("Android実タッチの長押しは一操作で中心へ量を重ねて厚く広がる", async ({
     page,
   }, testInfo) => {
@@ -836,8 +984,9 @@ test.describe("スマホ実タッチの回帰", () => {
           })
           .toBeGreaterThan(8);
 
-        // A live stroke is only a preview until pointerup; recipes and the
-        // authoritative paint canvas must not be contaminated mid-gesture.
+        // The recipe readout follows the live stroke, while authoritative
+        // paint pixels and history remain uncommitted until pointerup.
+        await expect(page.getByTestId("recipe-blue")).toHaveText("3");
         await expect
           .poll(async () => {
             const pixel = await sourcePixelAtRatio(
@@ -923,7 +1072,9 @@ test.describe("スマホ実タッチの回帰", () => {
             return pixel;
           })
           .toBeGreaterThan(8);
-        await expect(page.getByTestId("recipe-blue")).toHaveCount(0);
+        await expect(page.getByTestId("recipe-blue")).toHaveText(
+          String(expectedUnits),
+        );
       },
     );
 
@@ -1045,7 +1196,13 @@ test.describe("スマホ実タッチの回帰", () => {
     await touchElement(page, page.getByTestId("material-black"));
     await withCanvasTouch(page, canvas, 0.5, 0.55, async () => {
       await page.waitForTimeout(430);
+      await expect
+        .poll(async () => Number(
+          await page.getByTestId("recipe-black").textContent(),
+        ))
+        .toBeGreaterThan(1);
       await page.getByTestId("material-blue").click();
+      await expect(page.getByTestId("recipe-black")).toHaveCount(0);
     });
 
     await expect(

@@ -908,7 +908,8 @@ export default function ColorRecipeApp() {
     );
     if (
       !targetPigmentUnits ||
-      (sample && sample.coverage <= 0.002)
+      (sample &&
+        (sample.coverage <= 0.002 || sample.renderedAlpha === 0))
     ) {
       return;
     }

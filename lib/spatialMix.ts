@@ -1,5 +1,6 @@
 import {
   mixPaintProportions,
+  mixPaintProportionsFromRgb,
   type MixedPaintColor,
 } from "./colorScience";
 import {
@@ -33,12 +34,14 @@ export type SpatialPaintSample = {
    * unit at its centre and fades smoothly toward its irregular edge.
    */
   weights: Record<MaterialId, number>;
-  /** Integer proxy recipe used by the spectral colour engine. */
+  /** Compact integer proxy for display/saving; exact colour uses `weights`. */
   recipe: RecipeUnits;
   pigmentRatio: Record<PigmentId, number>;
   waterRatio: number;
   coverage: number;
   mixed: MixedPaintColor;
+  /** Alpha read from the rendered palette when sampled by the eyedropper. */
+  renderedAlpha?: number;
 };
 
 const SIZE_RADIUS: Record<PaintSize, number> = {
@@ -54,7 +57,18 @@ const DEFAULT_VIEWPORT: SpatialSampleViewport = {
 const PROXY_PIGMENT_UNITS = 32;
 const SPATIAL_INDEX_COLUMNS = 16;
 const COLOUR_RATIO_SUBDIVISIONS = 64;
-const MAX_LOCAL_RECIPE_UNITS = 128;
+// Keep a sampled recipe within the persistence schema's per-material limit
+// while retaining ratios as small as one part in 500 (for example 998:2).
+const MAX_LOCAL_RECIPE_UNITS = 1_000;
+// Stop at the smallest integer recipe whose summed material-share error is at
+// most 0.2 percentage points. This keeps ordinary sampled recipes reusable
+// instead of needlessly consuming the full persistence allowance.
+const MAX_LOCAL_RECIPE_TOTAL_SHARE_ERROR = 0.002;
+// At or below a 0.2% pigment share, absolute total-recipe error can hide a
+// colourant in water. Preserve these traces against the pigment-only ratio to
+// within 0.1%; 998:2 therefore remains the exact reduced ratio 499:1.
+const TRACE_PIGMENT_SHARE = 1 / 500;
+const MAX_TRACE_PIGMENT_RELATIVE_ERROR = 0.001;
 
 const clamp = (value: number, minimum = 0, maximum = 1) =>
   Math.min(maximum, Math.max(minimum, value));
@@ -159,10 +173,16 @@ export function paintDabContribution(
   if (squaredDistance >= 1) return 0;
 
   // A smooth compact kernel keeps a tap exactly circular in physical pixels.
-  // Held paint uses the same centre-weighted mass with a small deterministic
-  // edge wave; its deposited units therefore remain available to the
-  // eyedropper instead of being a display-only darkening effect.
-  return (1 - squaredDistance) ** 1.55;
+  // When water expands both radii by s, raising the exponent from p to
+  // s²(p + 1) - 1 preserves the analytic kernel integral while keeping the
+  // centre contribution exactly one unit. This spreads/thins the shoulder
+  // without either creating pigment mass or corrupting a centre 1:1 ratio.
+  const dryExponent = 1.55;
+  const kernelExponent =
+    role === "pigment" && radiusScale > 1
+      ? radiusScale ** 2 * (dryExponent + 1) - 1
+      : dryExponent;
+  return (1 - squaredDistance) ** kernelExponent;
 }
 
 function distanceToSegment(
@@ -266,6 +286,10 @@ function proxyRecipeFromWeights(
   return recipe;
 }
 
+/**
+ * Quantised colour proxy used only when a caller supplies a render cache.
+ * Direct samples must send their continuous weights to the colour engine.
+ */
 function colourRecipeFromWeights(
   weights: Record<MaterialId, number>,
 ): Required<RecipeUnits> {
@@ -314,13 +338,17 @@ function compactRecipeFromWeights(
           weights[pigment] > weights[largest] ? pigment : largest,
         )
       : undefined;
-  const requiredMaterials = new Set(
-    activeMaterials.filter(
-      (material) =>
-        weights[material] / totalWeight >=
-        0.5 / MAX_LOCAL_RECIPE_UNITS,
+  const minimumRepresentableShare = 0.5 / MAX_LOCAL_RECIPE_UNITS;
+  const requiredMaterials = new Set<MaterialId>(
+    PIGMENT_IDS.filter(
+      (pigment) =>
+        pigmentWeight > 0 &&
+        weights[pigment] / pigmentWeight >= minimumRepresentableShare,
     ),
   );
+  if (weights.water / totalWeight >= minimumRepresentableShare) {
+    requiredMaterials.add("water");
+  }
   if (dominantPigment) requiredMaterials.add(dominantPigment);
   let bestRecipe: RecipeUnits | undefined;
   let bestError = Number.POSITIVE_INFINITY;
@@ -364,12 +392,41 @@ function compactRecipeFromWeights(
       const candidateShare = units[index] / totalUnits;
       return sum + Math.abs(exactShare - candidateShare);
     }, 0);
+    const candidatePigmentUnits = PIGMENT_IDS.reduce(
+      (sum, pigment) => sum + units[MATERIAL_IDS.indexOf(pigment)],
+      0,
+    );
+    const preservesTracePigments = PIGMENT_IDS.every((pigment) => {
+      if (
+        weights[pigment] <= 0 ||
+        pigmentWeight <= 0 ||
+        !requiredMaterials.has(pigment)
+      ) {
+        return true;
+      }
+      const exactPigmentShare = weights[pigment] / pigmentWeight;
+      if (exactPigmentShare > TRACE_PIGMENT_SHARE + 1e-12) return true;
+      if (candidatePigmentUnits <= 0) return false;
+      const candidatePigmentShare =
+        units[MATERIAL_IDS.indexOf(pigment)] / candidatePigmentUnits;
+      return (
+        Math.abs(candidatePigmentShare - exactPigmentShare) /
+          exactPigmentShare <=
+        MAX_TRACE_PIGMENT_RELATIVE_ERROR
+      );
+    });
+    const candidateRecipe = Object.fromEntries(
+      MATERIAL_IDS.map((material, index) => [material, units[index]]),
+    ) as RecipeUnits;
+    if (
+      error <= MAX_LOCAL_RECIPE_TOTAL_SHARE_ERROR + 1e-12 &&
+      preservesTracePigments
+    ) {
+      return candidateRecipe;
+    }
     if (error + 1e-12 < bestError) {
       bestError = error;
-      bestRecipe = Object.fromEntries(
-        MATERIAL_IDS.map((material, index) => [material, units[index]]),
-      ) as RecipeUnits;
-      if (error <= 1e-10) break;
+      bestRecipe = candidateRecipe;
     }
   }
 
@@ -390,6 +447,9 @@ function compactRecipeFromWeights(
  * Samples the locally overlapping paint at a normalised palette coordinate.
  * The returned ratio is spatial: moving through an overlap changes the recipe
  * continuously, while every original dab still represents exactly one unit.
+ * Without a colour cache, the spectral engine receives those continuous
+ * weights unchanged. Supplying a cache explicitly opts rendering into a
+ * bounded ratio quantisation so neighbouring pixels can reuse colours.
  */
 export function sampleSpatialPaint(
   state: SpatialMixState,
@@ -504,16 +564,27 @@ function sampleSpatialPaintFromSteps(
   ) as Record<PigmentId, number>;
   const waterRatio = totalWeight > 0 ? weights.water / totalWeight : 0;
   const recipe = proxyRecipeFromWeights(weights);
-  const colourRecipe = colourRecipeFromWeights(weights);
-  const cacheKey = MATERIAL_IDS.map(
-    (material) =>
-      Math.round(colourRecipe[material] * COLOUR_RATIO_SUBDIVISIONS),
-  ).join(":");
-  let mixed = colourCache?.get(cacheKey);
-  if (!mixed) {
-    mixed = mixPaintProportions(colourRecipe);
-    colourCache?.set(cacheKey, mixed);
-  }
+  const mixed = (() => {
+    if (!colourCache) {
+      return mixPaintProportions(weights);
+    }
+
+    // Dense field rendering deliberately trades sub-pixel ratio precision for
+    // cache reuse. Picker/direct sampling never enters this branch.
+    const colourRecipe = colourRecipeFromWeights(weights);
+    const cacheKey = PIGMENT_IDS.map(
+      (pigment) =>
+        Math.round(colourRecipe[pigment] * COLOUR_RATIO_SUBDIVISIONS),
+    ).join(":");
+    const cached = colourCache.get(cacheKey);
+    if (cached) {
+      return mixPaintProportionsFromRgb(weights, cached.rgb);
+    }
+
+    const calculated = mixPaintProportions(colourRecipe);
+    colourCache.set(cacheKey, calculated);
+    return mixPaintProportionsFromRgb(weights, calculated.rgb);
+  })();
 
   return {
     point,
