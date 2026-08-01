@@ -198,7 +198,17 @@ test("保存色を混色パレットへ置くたびに元レシピの配合を�
   await expect(page.getByTestId("recipe-dialog")).toHaveCount(0);
   await expect(recipeMaterial).toHaveAttribute("aria-pressed", "true");
 
-  await clickCanvasAtRatio(canvas, point.x, point.y);
+  const canvasBox = await canvas.boundingBox();
+  if (!canvasBox) throw new Error("Mixing canvas is unavailable");
+  await page.mouse.move(
+    canvasBox.x + canvasBox.width * point.x,
+    canvasBox.y + canvasBox.height * point.y,
+  );
+  await page.mouse.down();
+  await expect(page.getByTestId("recipe-red")).toHaveText("2");
+  await expect(page.getByTestId("recipe-blue")).toHaveText("1");
+  await expect(page.getByTestId("recipe-water")).toHaveText("2");
+  await page.mouse.up();
   await expect(page.getByTestId("recipe-red")).toHaveText("2");
   await expect(page.getByTestId("recipe-blue")).toHaveText("1");
   await expect(page.getByTestId("recipe-water")).toHaveText("2");

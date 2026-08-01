@@ -21,6 +21,7 @@ type RecipeInspectorProps = {
   onToggleDetailed: () => void;
   onClearSample?: () => void;
   onRegister: () => void;
+  registerDisabled?: boolean;
 };
 
 export function RecipeInspector({
@@ -32,6 +33,7 @@ export function RecipeInspector({
   onToggleDetailed,
   onClearSample,
   onRegister,
+  registerDisabled = false,
 }: RecipeInspectorProps) {
   const displayRecipe = sampled?.recipe ?? recipe;
   const displayMixed = sampled?.mixed ?? mixed;
@@ -40,12 +42,16 @@ export function RecipeInspector({
     : PIGMENT_IDS.reduce((sum, key) => sum + recipe[key], 0);
   const waterAmount = sampled?.weights.water ?? recipe.water;
   const overallTotal = pigmentTotal + waterAmount;
-  const hasPigment = pigmentTotal > 0.0001;
-  const hasMaterial = overallTotal > 0.0001;
+  const renderedSampleVisible =
+    !sampled || sampled.renderedAlpha === undefined || sampled.renderedAlpha > 0;
+  const hasPigment = pigmentTotal > 0.0001 && renderedSampleVisible;
+  const hasMaterial = overallTotal > 0.0001 && renderedSampleVisible;
   const displayWaterRatio = sampled?.waterRatio ?? mixed.waterRatio;
-  const activePigments = PIGMENT_IDS.filter((key) =>
-    sampled ? sampled.weights[key] > 0.0001 : recipe[key] > 0,
-  );
+  const activePigments = renderedSampleVisible
+    ? PIGMENT_IDS.filter((key) =>
+        sampled ? sampled.weights[key] > 0.0001 : recipe[key] > 0,
+      )
+    : [];
 
   return (
     <section
@@ -107,7 +113,7 @@ export function RecipeInspector({
           className="sample-register-button"
           type="button"
           onClick={onRegister}
-          disabled={!hasPigment}
+          disabled={!hasPigment || registerDisabled}
           aria-label={sampled ? "スポイト地点の色を登録" : "この色を登録"}
           data-testid="open-save-color"
         >

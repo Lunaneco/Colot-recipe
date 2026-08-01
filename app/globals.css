@@ -547,6 +547,28 @@ button:disabled {
   opacity: 1;
 }
 
+/*
+ * The gesture layer is a complete transient render of the palette, including
+ * every existing dab and the uncommitted pointer stroke. Hiding both backing
+ * source layer prevents translucent paint from being composited twice while
+ * the user is touching the surface. When WebGL is ready, the gesture raster
+ * is also sent through the normal paint shader and sits beneath that output;
+ * without WebGL the 2D gesture raster remains the visible fallback.
+ */
+.paint-surface.is-live-preview .paint-layer--source {
+  opacity: 0;
+}
+
+.paint-surface.is-live-preview .paint-layer--gesture-preview {
+  z-index: 1;
+}
+
+.paint-surface.is-live-preview .paint-hold-preview,
+.paint-surface.is-live-preview .paint-hold-preview.is-holding,
+.paint-surface.is-live-preview .paint-hold-preview.is-water.is-holding {
+  opacity: 0;
+}
+
 .paint-hold-preview {
   position: absolute;
   z-index: 4;

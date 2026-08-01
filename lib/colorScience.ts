@@ -5,14 +5,27 @@ import {
   type MaterialId,
   type PigmentId,
 } from "./types";
+import {
+  CIE_1964_10_DEGREE_X,
+  CIE_1964_10_DEGREE_Y,
+  CIE_1964_10_DEGREE_Z,
+  CIE_STANDARD_ILLUMINANT_D65,
+} from "./cieD65";
+import {
+  PAINT_CALIBRATION,
+  PAINT_CALIBRATION_WAVELENGTHS_NM,
+} from "./paintCalibration";
 
 /**
- * A small, deterministic subtractive-colour engine for the palette.
+ * A deterministic, measured-data subtractive-colour engine for the palette.
  *
- * Each pigment is represented by a 31-sample reflectance curve (400–700 nm).
- * Reflectance is mixed in Kubelka–Munk K/S space and converted through
- * CIE 1931 XYZ (D65) to sRGB. This is deliberately different from averaging
- * RGB triplets: pigments remove overlapping portions of the spectrum.
+ * Four pigments use Golden Heavy Body measured reflectance and K/S data at 31
+ * samples (400–700 nm); white is the explicitly documented K/S=0 scattering
+ * reference because that shared workbook contains no Titanium White row.
+ * Relative paint parts are mixed in single-constant Kubelka–Munk space, then
+ * converted with the source's CIE 1964 10°/D65 colorimetry and adapted to the
+ * standard sRGB D65 white point. This is deliberately different from averaging
+ * RGB triplets: pigments remove overlapping regions of the spectrum.
  */
 
 /** Backward-compatible names retained for callers of the colour engine. */
@@ -61,111 +74,32 @@ export interface MixedPaintColor {
   name: string;
 }
 
-const WAVELENGTHS = Array.from({ length: 31 }, (_, index) => 400 + index * 10);
-
-// CIE 1931 2° colour-matching functions, sampled at the same 10 nm interval.
-const CIE_X = [
-  0.01431, 0.04351, 0.13438, 0.2839, 0.34828, 0.3362, 0.2908, 0.19536,
-  0.09564, 0.03201, 0.0049, 0.0093, 0.06327, 0.1655, 0.2904, 0.43345,
-  0.5945, 0.7621, 0.9163, 1.0263, 1.0622, 1.0026, 0.85445, 0.6424,
-  0.4479, 0.2835, 0.1649, 0.0874, 0.04677, 0.0227, 0.011359,
-] as const;
-
-const CIE_Y = [
-  0.000396, 0.00121, 0.004, 0.0116, 0.023, 0.038, 0.06, 0.09098, 0.13902,
-  0.20802, 0.323, 0.503, 0.71, 0.862, 0.954, 0.99495, 0.995, 0.952, 0.87,
-  0.757, 0.631, 0.503, 0.381, 0.265, 0.175, 0.107, 0.061, 0.032, 0.017,
-  0.00821, 0.004102,
-] as const;
-
-const CIE_Z = [
-  0.06785, 0.2074, 0.6456, 1.3856, 1.74706, 1.77211, 1.6692, 1.28764,
-  0.81295, 0.46518, 0.272, 0.1582, 0.07825, 0.04216, 0.0203, 0.00875,
-  0.0039, 0.0021, 0.00165, 0.0011, 0.0008, 0.00034, 0.00019, 0.00005, 0,
-  0, 0, 0, 0, 0, 0,
-] as const;
-
-// Relative spectral power distribution of standard illuminant D65.
-const D65 = [
-  82.7549, 91.486, 93.4318, 86.6823, 104.865, 117.008, 117.812, 114.861,
-  115.923, 108.811, 109.354, 107.802, 104.79, 107.689, 104.405, 104.046,
-  100, 96.3342, 95.788, 88.6856, 90.0062, 89.5991, 87.6987, 83.2886,
-  83.6992, 80.0268, 80.2146, 82.2778, 78.2842, 69.7213, 71.6091,
-] as const;
-
-const gaussian = (wavelength: number, centre: number, width: number) =>
-  Math.exp(-0.5 * ((wavelength - centre) / width) ** 2);
-
-const sigmoid = (value: number) => 1 / (1 + Math.exp(-value));
-
 const clamp = (value: number, minimum = 0, maximum = 1) =>
   Math.min(maximum, Math.max(minimum, value));
 
-const makeSpectrum = (
-  sample: (wavelength: number) => number,
-): readonly number[] => WAVELENGTHS.map((wavelength) => clamp(sample(wavelength), 0.018, 0.94));
+const kmRatioToInternalReflectance = (ratio: number) =>
+  clamp(1 + ratio - Math.sqrt(ratio * ratio + 2 * ratio));
 
 /**
- * Artist-paint inspired reflectance curves. They are smooth synthetic spectra,
- * not monitor colours. Their overlapping absorption bands are what produce the
- * orange, green, muted-violet and neutral three-pigment mixtures.
+ * Pure-paint reflectances reconstructed from the source K/S profile. Small
+ * differences from the source's rounded percent-reflectance columns are
+ * expected because its K/S values carry different decimal precision.
  */
 export const PIGMENT_REFLECTANCE: Readonly<
   Record<PigmentKey, readonly number[]>
-> = {
-  red: makeSpectrum(
-    (wavelength) =>
-      0.028 +
-      0.72 * sigmoid((wavelength - 580) / 16) +
-      // A small violet reflectance lobe distinguishes an artist's cool red
-      // from an ideal display primary and lets red + blue retain both ends.
-      0.15 * gaussian(wavelength, 438, 34),
-  ),
-  blue: makeSpectrum(
-    (wavelength) =>
-      0.026 +
-      0.53 * gaussian(wavelength, 452, 43) +
-      0.075 * gaussian(wavelength, 505, 58) +
-      // Ultramarine-like warm tail: weak enough to keep yellow + blue green,
-      // but sufficient for a muted red + blue violet.
-      0.11 * gaussian(wavelength, 652, 55),
-  ),
-  yellow: makeSpectrum(
-    (wavelength) =>
-      0.035 +
-      0.79 * sigmoid((wavelength - 492) / 13) +
-      0.035 * gaussian(wavelength, 575, 90),
-  ),
-  black: makeSpectrum(
-    (wavelength) =>
-      0.012 +
-      0.004 * gaussian(wavelength, 455, 80) +
-      0.002 * gaussian(wavelength, 650, 105),
-  ),
-  white: makeSpectrum(
-    (wavelength) =>
-      0.89 +
-      0.018 * gaussian(wavelength, 455, 85) -
-      0.01 * gaussian(wavelength, 610, 100),
-  ),
-};
-
-// Relative scattering power. Titanium white scatters especially strongly.
-const SCATTERING_POWER: Readonly<Record<PigmentKey, number>> = {
-  red: 1,
-  blue: 1.12,
-  yellow: 1.2,
-  black: 0.72,
-  white: 3.4,
-};
-
-const reflectanceToKS = (reflectance: number) => {
-  const safeReflectance = clamp(reflectance, 0.0001, 0.9999);
-  return ((1 - safeReflectance) ** 2) / (2 * safeReflectance);
-};
-
-const ksToReflectance = (ks: number) =>
-  clamp(1 + ks - Math.sqrt(ks * ks + 2 * ks));
+> = Object.freeze(
+  Object.fromEntries(
+    PIGMENT_IDS.map((pigment) => {
+      const calibration = PAINT_CALIBRATION[pigment];
+      return [
+        pigment,
+        Object.freeze(
+          calibration.ks.map(kmRatioToInternalReflectance),
+        ),
+      ];
+    }),
+  ) as Record<PigmentKey, readonly number[]>,
+);
 
 const normaliseUnits = (
   value: number | undefined,
@@ -215,91 +149,164 @@ const mixReflectance = (
 
   if (pigmentUnits === 0) return PIGMENT_REFLECTANCE.white;
 
-  // Ideal K/S addition slightly overstates the chroma of red–yellow blends.
-  // A geometric-mean interaction term models the extra optical path where the
-  // two pigments meet: it is zero for either pure endpoint, peaks for balanced
-  // mixtures, and is naturally masked by titanium white.
-  const warmBase = clamp(
-    (2 * Math.sqrt(recipe.red * recipe.yellow) * 1.02) / pigmentUnits,
-  );
-  const blueShare = recipe.blue / pigmentUnits;
-  const blueTransition = clamp(blueShare / 0.08);
-  const blueMask =
-    1 -
-    blueTransition *
-      blueTransition *
-      (3 - 2 * blueTransition);
-  const warmInteraction = warmBase * blueMask;
-  return WAVELENGTHS.map((wavelength, wavelengthIndex) => {
-    let mixedAbsorption = 0;
-    let mixedScattering = 0;
+  // The shared workbook supplies one K/S curve per complete paint. Under the
+  // single-constant Kubelka–Munk assumption, recipe shares linearly combine
+  // those K/S values before the standard inverse maps them to reflectance.
+  return PAINT_CALIBRATION_WAVELENGTHS_NM.map((_, wavelengthIndex) => {
+    let mixedKs = 0;
 
     for (const pigment of PIGMENT_IDS) {
       const units = recipe[pigment];
       if (units === 0) continue;
-
-      const scattering = units * SCATTERING_POWER[pigment];
-      const ks = reflectanceToKS(
-        PIGMENT_REFLECTANCE[pigment][wavelengthIndex],
-      );
-      mixedAbsorption += scattering * ks;
-      mixedScattering += scattering;
+      mixedKs += units * PAINT_CALIBRATION[pigment].ks[wavelengthIndex];
     }
 
-    const reflectance = ksToReflectance(mixedAbsorption / mixedScattering);
-
-    // The interaction suppresses the violet-blue tail and far-red shoulder
-    // while retaining the yellow-green window, matching a physical orange
-    // draw-down instead of a luminous display-primary blend.
-    const filmAbsorption =
-      0.085 +
-      0.46 * gaussian(wavelength, 445, 45) +
-      0.29 * gaussian(wavelength, 650, 80) -
-      0.136 * gaussian(wavelength, 545, 42);
-
-    return reflectance * (1 - warmInteraction * filmAbsorption);
+    return kmRatioToInternalReflectance(mixedKs / pigmentUnits);
   });
 };
 
-const spectrumToRgb = (reflectance: readonly number[]): RGBColor => {
-  const normalizer =
-    1 /
-    D65.reduce(
-      (total, illuminant, index) => total + illuminant * CIE_Y[index],
-      0,
+/**
+ * Expose the calibrated physical reflectance for verification and future
+ * colour-management outputs. Water is intentionally excluded from the
+ * intrinsic pigment spectrum, exactly as it is in the visible colour result.
+ */
+export function mixPaintReflectanceProportions(
+  recipeInput: PaintRecipe = {},
+): readonly number[] {
+  return mixReflectance(normalizePaintProportions(recipeInput));
+}
+
+type LinearRGBColor = { r: number; g: number; b: number };
+type XYZColor = { x: number; y: number; z: number };
+type OKLabColor = { l: number; a: number; b: number };
+
+const spectralNormalizer =
+  1 /
+  CIE_STANDARD_ILLUMINANT_D65.reduce(
+    (total, illuminant, index) =>
+      total + illuminant * CIE_1964_10_DEGREE_Y[index],
+    0,
+  );
+
+const spectrumToXyz10Degree = (
+  reflectance: readonly number[],
+): XYZColor => {
+  if (reflectance.length !== PAINT_CALIBRATION_WAVELENGTHS_NM.length) {
+    throw new RangeError(
+      `reflectance must contain ${PAINT_CALIBRATION_WAVELENGTHS_NM.length} samples`,
     );
+  }
 
   let x = 0;
   let y = 0;
   let z = 0;
 
   for (let index = 0; index < reflectance.length; index += 1) {
-    const stimulus = reflectance[index] * D65[index] * normalizer;
-    x += stimulus * CIE_X[index];
-    y += stimulus * CIE_Y[index];
-    z += stimulus * CIE_Z[index];
+    const stimulus =
+      reflectance[index] *
+      CIE_STANDARD_ILLUMINANT_D65[index] *
+      spectralNormalizer;
+    x += stimulus * CIE_1964_10_DEGREE_X[index];
+    y += stimulus * CIE_1964_10_DEGREE_Y[index];
+    z += stimulus * CIE_1964_10_DEGREE_Z[index];
   }
 
-  // CIE XYZ (D65) to linear sRGB.
-  const linearRed = 3.2406 * x - 1.5372 * y - 0.4986 * z;
-  const linearGreen = -0.9689 * x + 1.8758 * y + 0.0415 * z;
-  const linearBlue = 0.0557 * x - 0.204 * y + 1.057 * z;
+  return { x, y, z };
+};
 
-  const encodeSrgb = (channel: number) => {
-    const clipped = clamp(channel);
-    const encoded =
-      clipped <= 0.0031308
-        ? 12.92 * clipped
-        : 1.055 * clipped ** (1 / 2.4) - 0.055;
-    return Math.round(clamp(encoded) * 255);
-  };
+const multiplyMatrix3 = (
+  matrix: readonly (readonly [number, number, number])[],
+  value: readonly [number, number, number],
+): [number, number, number] => [
+  matrix[0][0] * value[0] +
+    matrix[0][1] * value[1] +
+    matrix[0][2] * value[2],
+  matrix[1][0] * value[0] +
+    matrix[1][1] * value[1] +
+    matrix[1][2] * value[2],
+  matrix[2][0] * value[0] +
+    matrix[2][1] * value[1] +
+    matrix[2][2] * value[2],
+];
 
+const BRADFORD = [
+  [0.8951, 0.2664, -0.1614],
+  [-0.7502, 1.7135, 0.0367],
+  [0.0389, -0.0685, 1.0296],
+] as const;
+const BRADFORD_INVERSE = [
+  [0.9869929, -0.1470543, 0.1599627],
+  [0.4323053, 0.5183603, 0.0492912],
+  [-0.0085287, 0.0400428, 0.9684867],
+] as const;
+const SRGB_D65_WHITE_XYZ = [0.95047, 1, 1.08883] as const;
+const SOURCE_D65_WHITE_XYZ = spectrumToXyz10Degree(
+  PAINT_CALIBRATION_WAVELENGTHS_NM.map(() => 1),
+);
+const SOURCE_D65_WHITE_CONE = multiplyMatrix3(BRADFORD, [
+  SOURCE_D65_WHITE_XYZ.x,
+  SOURCE_D65_WHITE_XYZ.y,
+  SOURCE_D65_WHITE_XYZ.z,
+]);
+const SRGB_D65_WHITE_CONE = multiplyMatrix3(
+  BRADFORD,
+  SRGB_D65_WHITE_XYZ,
+);
+
+/**
+ * The workbook's supplied Lab condition is CIE 1964 10°, while standard sRGB
+ * uses the CIE 1931 2° D65 white point. Bradford adaptation prevents a neutral
+ * reflector from acquiring a cast when those definitions meet.
+ */
+const adaptXyz10DegreeToSrgbWhite = ({ x, y, z }: XYZColor): XYZColor => {
+  const sourceCone = multiplyMatrix3(BRADFORD, [x, y, z]);
+  const adapted = multiplyMatrix3(BRADFORD_INVERSE, [
+    sourceCone[0] * (SRGB_D65_WHITE_CONE[0] / SOURCE_D65_WHITE_CONE[0]),
+    sourceCone[1] * (SRGB_D65_WHITE_CONE[1] / SOURCE_D65_WHITE_CONE[1]),
+    sourceCone[2] * (SRGB_D65_WHITE_CONE[2] / SOURCE_D65_WHITE_CONE[2]),
+  ]);
+  return { x: adapted[0], y: adapted[1], z: adapted[2] };
+};
+
+const spectrumToLinearRgb = (
+  reflectance: readonly number[],
+): LinearRGBColor => {
+  const { x, y, z } = adaptXyz10DegreeToSrgbWhite(
+    spectrumToXyz10Degree(reflectance),
+  );
+
+  // CIE XYZ D65 -> linear sRGB, using the high-precision CSS Color 4 matrix.
   return {
-    r: encodeSrgb(linearRed),
-    g: encodeSrgb(linearGreen),
-    b: encodeSrgb(linearBlue),
+    r:
+      3.2409699419045226 * x -
+      1.537383177570094 * y -
+      0.4986107602930034 * z,
+    g:
+      -0.9692436362808796 * x +
+      1.8759675015077202 * y +
+      0.04155505740717559 * z,
+    b:
+      0.05563007969699366 * x -
+      0.20397695888897652 * y +
+      1.0569715142428786 * z,
   };
 };
+
+const encodeSrgb = (channel: number) => {
+  const clipped = clamp(channel);
+  const encoded =
+    clipped <= 0.0031308
+      ? 12.92 * clipped
+      : 1.055 * clipped ** (1 / 2.4) - 0.055;
+  return Math.round(clamp(encoded) * 255);
+};
+
+const linearRgbToRgb = ({ r, g, b }: LinearRGBColor): RGBColor =>
+  ({
+    r: encodeSrgb(r),
+    g: encodeSrgb(g),
+    b: encodeSrgb(b),
+  });
 
 export const rgbToHex = ({ r, g, b }: RGBColor): `#${string}` =>
   `#${[r, g, b]
@@ -319,76 +326,188 @@ export const hexToRgb = (hex: string): RGBColor => {
   };
 };
 
-const DISPLAY_ANCHORED_PIGMENTS = ["red", "blue", "yellow", "black"] as const;
-const ENDPOINT_ANCHOR_START = 0.8;
-const DISPLAY_ENDPOINTS = Object.fromEntries(
-  DISPLAY_ANCHORED_PIGMENTS.map((pigment) => [
-    pigment,
-    {
-      spectral: spectrumToRgb(PIGMENT_REFLECTANCE[pigment]),
-      target: hexToRgb(MATERIAL_COLORS[pigment]),
-    },
-  ]),
-) as Record<
-  (typeof DISPLAY_ANCHORED_PIGMENTS)[number],
-  { spectral: RGBColor; target: RGBColor }
->;
+const decodeSrgb = (channel: number) => {
+  const encoded = clamp(channel / 255);
+  return encoded <= 0.04045
+    ? encoded / 12.92
+    : ((encoded + 0.055) / 1.055) ** 2.4;
+};
+
+const rgbToLinearRgb = ({ r, g, b }: RGBColor): LinearRGBColor => ({
+  r: decodeSrgb(r),
+  g: decodeSrgb(g),
+  b: decodeSrgb(b),
+});
+
+const linearSrgbToOklab = ({ r, g, b }: LinearRGBColor): OKLabColor => {
+  const l = Math.cbrt(
+    0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b,
+  );
+  const m = Math.cbrt(
+    0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b,
+  );
+  const s = Math.cbrt(
+    0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b,
+  );
+  return {
+    l: 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+    a: 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+    b: 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+  };
+};
+
+const oklabToLinearSrgb = ({ l, a, b }: OKLabColor): LinearRGBColor => {
+  const lRoot = l + 0.3963377774 * a + 0.2158037573 * b;
+  const mRoot = l - 0.1055613458 * a - 0.0638541728 * b;
+  const sRoot = l - 0.0894841775 * a - 1.291485548 * b;
+  const lCone = lRoot ** 3;
+  const mCone = mRoot ** 3;
+  const sCone = sRoot ** 3;
+  return {
+    r:
+      4.0767416621 * lCone -
+      3.3077115913 * mCone +
+      0.2309699292 * sCone,
+    g:
+      -1.2684380046 * lCone +
+      2.6097574011 * mCone -
+      0.3413193965 * sCone,
+    b:
+      -0.0041960863 * lCone -
+      0.7034186147 * mCone +
+      1.707614701 * sCone,
+  };
+};
+
+const isLinearSrgbInGamut = ({ r, g, b }: LinearRGBColor) =>
+  r >= -1e-7 && r <= 1 + 1e-7 &&
+  g >= -1e-7 && g <= 1 + 1e-7 &&
+  b >= -1e-7 && b <= 1 + 1e-7;
 
 /**
- * Keep the unmixed starting colours exact without replacing the
- * subtractive spectra that make mixed paint look natural. The correction
- * eases smoothly to zero before another pigment reaches one fifth of the
- * pigment load, so overlap colours remain continuous and balanced recipes
- * retain their physical spectral result.
+ * Preserve OKLab lightness and hue, reducing only chroma when a spectral
+ * colour falls outside sRGB. Independent channel clipping can rotate hue and
+ * even reverse a tint ramp, so it is used only as final floating-point safety.
  */
-const anchorDisplayEndpoint = (
+const gamutMapOklabToLinearSrgb = (colour: OKLabColor): LinearRGBColor => {
+  const lightness = clamp(colour.l);
+  if (lightness === 0) return { r: 0, g: 0, b: 0 };
+  if (lightness === 1) return { r: 1, g: 1, b: 1 };
+
+  const candidate = oklabToLinearSrgb({ ...colour, l: lightness });
+  if (isLinearSrgbInGamut(candidate)) return candidate;
+
+  const chroma = Math.hypot(colour.a, colour.b);
+  if (chroma <= Number.EPSILON) {
+    return oklabToLinearSrgb({ l: lightness, a: 0, b: 0 });
+  }
+  const hueA = colour.a / chroma;
+  const hueB = colour.b / chroma;
+  let lower = 0;
+  let upper = chroma;
+  let mapped = oklabToLinearSrgb({ l: lightness, a: 0, b: 0 });
+  for (let iteration = 0; iteration < 24; iteration += 1) {
+    const middle = (lower + upper) / 2;
+    const trial = oklabToLinearSrgb({
+      l: lightness,
+      a: hueA * middle,
+      b: hueB * middle,
+    });
+    if (isLinearSrgbInGamut(trial)) {
+      lower = middle;
+      mapped = trial;
+    } else {
+      upper = middle;
+    }
+  }
+  return mapped;
+};
+
+const PHYSICAL_ENDPOINTS_OKLAB = Object.freeze(
+  Object.fromEntries(
+    PIGMENT_IDS.map((pigment) => [
+      pigment,
+      linearSrgbToOklab(
+        spectrumToLinearRgb(PIGMENT_REFLECTANCE[pigment]),
+      ),
+    ]),
+  ) as Record<PigmentKey, OKLabColor>,
+);
+
+const DISPLAY_ENDPOINTS_OKLAB = Object.freeze(
+  Object.fromEntries(
+    PIGMENT_IDS.map((pigment) => [
+      pigment,
+      linearSrgbToOklab(
+        rgbToLinearRgb(hexToRgb(MATERIAL_COLORS[pigment])),
+      ),
+    ]),
+  ) as Record<PigmentKey, OKLabColor>,
+);
+
+/**
+ * The measured Golden paints and the app's previously specified pure swatches
+ * are different colour definitions: an sRGB HEX cannot identify a pigment.
+ * The display rendering starts with the share-weighted specified endpoints,
+ * then restores the measured spectral interaction residual as two or more
+ * chromatic pigments meet. Its strength rises continuously with chromatic
+ * diversity and falls with white/black dilution. This preserves intuitive,
+ * monotonic tints and shades without turning red+blue into an RGB average.
+ * The physical reflectance export is never changed by this rendering intent.
+ */
+const calibrateDisplayEndpoints = (
   recipe: Required<PaintRecipe>,
-  spectralRgb: RGBColor,
-): RGBColor => {
+  physicalLinear: LinearRGBColor,
+): LinearRGBColor => {
   const pigmentUnits = PIGMENT_IDS.reduce(
     (total, pigment) => total + recipe[pigment],
     0,
   );
-  if (pigmentUnits === 0) return spectralRgb;
-
-  const pigment = DISPLAY_ANCHORED_PIGMENTS.reduce((dominant, candidate) =>
-    recipe[candidate] > recipe[dominant] ? candidate : dominant,
+  if (pigmentUnits === 0) return gamutMapOklabToLinearSrgb(
+    linearSrgbToOklab(physicalLinear),
   );
-  const pigmentShare = recipe[pigment] / pigmentUnits;
-  const progress = clamp(
-    (pigmentShare - ENDPOINT_ANCHOR_START) / (1 - ENDPOINT_ANCHOR_START),
-  );
-  if (progress === 0) return spectralRgb;
 
-  const weight = progress * progress * (3 - 2 * progress);
-  const { spectral: spectralEndpoint, target: targetEndpoint } =
-    DISPLAY_ENDPOINTS[pigment];
-  return {
-    r: Math.round(
-      clamp(
-        spectralRgb.r +
-          (targetEndpoint.r - spectralEndpoint.r) * weight,
-        0,
-        255,
-      ),
-    ),
-    g: Math.round(
-      clamp(
-        spectralRgb.g +
-          (targetEndpoint.g - spectralEndpoint.g) * weight,
-        0,
-        255,
-      ),
-    ),
-    b: Math.round(
-      clamp(
-        spectralRgb.b +
-          (targetEndpoint.b - spectralEndpoint.b) * weight,
-        0,
-        255,
-      ),
-    ),
+  const physical = linearSrgbToOklab(physicalLinear);
+  const physicalBarycentre: OKLabColor = { l: 0, a: 0, b: 0 };
+  const displayBarycentre: OKLabColor = { l: 0, a: 0, b: 0 };
+  for (const pigment of PIGMENT_IDS) {
+    const share = recipe[pigment] / pigmentUnits;
+    if (share === 0) continue;
+    const physicalEndpoint = PHYSICAL_ENDPOINTS_OKLAB[pigment];
+    const displayEndpoint = DISPLAY_ENDPOINTS_OKLAB[pigment];
+    physicalBarycentre.l += share * physicalEndpoint.l;
+    physicalBarycentre.a += share * physicalEndpoint.a;
+    physicalBarycentre.b += share * physicalEndpoint.b;
+    displayBarycentre.l += share * displayEndpoint.l;
+    displayBarycentre.a += share * displayEndpoint.a;
+    displayBarycentre.b += share * displayEndpoint.b;
+  }
+
+  const chromaticUnits = recipe.red + recipe.blue + recipe.yellow;
+  const chromaticShare = chromaticUnits / pigmentUnits;
+  const chromaticDiversity =
+    chromaticUnits === 0
+      ? 0
+      : 1 -
+        (["red", "blue", "yellow"] as const).reduce(
+          (sum, pigment) =>
+            sum + (recipe[pigment] / chromaticUnits) ** 2,
+          0,
+        );
+  const interactionStrength =
+    clamp(chromaticDiversity * 2) * chromaticShare;
+  const calibrated = {
+    l:
+      displayBarycentre.l +
+      (physical.l - physicalBarycentre.l) * interactionStrength,
+    a:
+      displayBarycentre.a +
+      (physical.a - physicalBarycentre.a) * interactionStrength,
+    b:
+      displayBarycentre.b +
+      (physical.b - physicalBarycentre.b) * interactionStrength,
   };
+  return gamutMapOklabToLinearSrgb(calibrated);
 };
 
 export const rgbToHsl = ({ r, g, b }: RGBColor): HSLColor => {
@@ -514,6 +633,7 @@ const suggestJapaneseName = (
  */
 function calculateMixedPaint(
   recipe: Required<PaintRecipe>,
+  displayRgb?: RGBColor,
 ): MixedPaintColor {
   const pigmentUnits = PIGMENT_IDS.reduce(
     (total, pigment) => total + recipe[pigment],
@@ -528,10 +648,13 @@ function calculateMixedPaint(
     ]),
   ) as Record<PigmentKey, number>;
 
-  const rgb = anchorDisplayEndpoint(
-    recipe,
-    spectrumToRgb(mixReflectance(recipe)),
-  );
+  const rgb = displayRgb ??
+    linearRgbToRgb(
+      calibrateDisplayEndpoints(
+        recipe,
+        spectrumToLinearRgb(mixReflectance(recipe)),
+      ),
+    );
   const hsl = rgbToHsl(rgb);
   const chromaticUnits = recipe.red + recipe.blue + recipe.yellow;
   const colouredUnits = chromaticUnits + recipe.black;
@@ -561,7 +684,10 @@ function calculateMixedPaint(
     chromaticUnits * 1.05 + recipe.black * 1.65 + recipe.white * 1.55;
   // One dry unit should already behave like body paint. Water then lowers the
   // pigment concentration into a translucent wash without changing its hue.
-  const dryCoverage = 1 - Math.exp(-opticalLoad * 3);
+  // A single undiluted chromatic part must survive the palette field's
+  // sub-pixel resampling as opaque body paint (alpha >= 245/255 at its
+  // centre). Water still controls the much larger concentration term below.
+  const dryCoverage = 1 - Math.exp(-opticalLoad * 3.7);
   const opacity = dryCoverage * (0.03 + 0.97 * concentration ** 0.8);
   const colourShare = colouredUnits / pigmentUnits;
   const chroma = hsl.s / 100;
@@ -614,6 +740,25 @@ export function mixPaintProportions(
   recipeInput: PaintRecipe = {},
 ): MixedPaintColor {
   return calculateMixedPaint(normalizePaintProportions(recipeInput));
+}
+
+/**
+ * Reapply exact local paint/water quantities to an already computed display
+ * RGB. Dense palette rendering caches the expensive spectral ratio colour,
+ * but opacity and handling still have to use the unscaled local quantities.
+ */
+export function mixPaintProportionsFromRgb(
+  recipeInput: PaintRecipe,
+  rgb: RGBColor,
+): MixedPaintColor {
+  for (const [channel, value] of Object.entries(rgb)) {
+    if (!Number.isInteger(value) || value < 0 || value > 255) {
+      throw new RangeError(`${channel} must be an integer from 0 to 255`);
+    }
+  }
+  return calculateMixedPaint(normalizePaintProportions(recipeInput), {
+    ...rgb,
+  });
 }
 
 /** Descriptive alias for callers that prefer a calculator-style name. */
