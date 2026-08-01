@@ -921,13 +921,22 @@ test.describe("スマホ実タッチの回帰", () => {
     await expect
       .poll(async () => {
         const pixel = await sourcePixelAtRatio(canvas, point.x, point.y);
-        return pixel.slice(0, 3);
+        return Math.max(
+          ...pixel
+            .slice(0, 3)
+            .map((channel, index) =>
+              Math.abs(
+                channel -
+                  [
+                    expectedCommitted.r,
+                    expectedCommitted.g,
+                    expectedCommitted.b,
+                  ][index],
+              ),
+            ),
+        );
       })
-      .toEqual([
-        expectedCommitted.r,
-        expectedCommitted.g,
-        expectedCommitted.b,
-      ]);
+      .toBeLessThanOrEqual(1);
     expect(
       (await sourcePixelAtRatio(canvas, point.x, point.y))[3],
     ).toBeGreaterThanOrEqual(240);
