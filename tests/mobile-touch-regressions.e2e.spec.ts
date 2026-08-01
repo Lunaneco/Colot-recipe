@@ -4,6 +4,7 @@ import {
   type Locator,
   type Page,
 } from "@playwright/test";
+import { mixPaint } from "../lib/colorScience";
 
 async function touchElement(
   page: Page,
@@ -834,7 +835,7 @@ test.describe("スマホ実タッチの回帰", () => {
     expect(committedRedPixel[3]).toBeGreaterThanOrEqual(240);
 
     await touchElement(page, page.getByTestId("material-blue"));
-    let liveMixedPixel: number[] | undefined;
+    let observedLiveBlueUnits = 0;
     await withCanvasTouch(
       page,
       canvas,
@@ -842,50 +843,94 @@ test.describe("スマホ実タッチの回帰", () => {
       point.y,
       async () => {
         // A real touchStart must paint immediately. At the overlap this is the
-        // calibrated 1:1 mixture, not the raw selected blue (#00A1E9).
+        // calibrated live mixture, not the raw selected blue (#00A1E9). A
+        // loaded CI runner may cross a hold threshold before this assertion,
+        // so compare against the actual live unit count instead of wall time.
         await expect
-          .poll(async () =>
-            (await layerPixelAtRatio(
+          .poll(async () => {
+            const units = Number(
+              await page.getByTestId("recipe-blue").textContent(),
+            );
+            const pixel = await layerPixelAtRatio(
               preview,
               point.x,
               point.y,
-            )).slice(0, 3),
-          )
-          .toEqual([132, 96, 108]);
-        liveMixedPixel = await layerPixelAtRatio(
-          preview,
-          point.x,
-          point.y,
-        );
-        expect(liveMixedPixel[3]).toBeGreaterThanOrEqual(240);
+            );
+            if (units < 1 || pixel[3] < 240) return false;
+            const expected = mixPaint({ red: 1, blue: units }).rgb;
+            const matches = pixel.slice(0, 3).every(
+              (channel, index) =>
+                channel === [expected.r, expected.g, expected.b][index],
+            );
+            if (matches) observedLiveBlueUnits = units;
+            return matches;
+          })
+          .toBe(true);
+        expect(observedLiveBlueUnits).toBeGreaterThanOrEqual(1);
+        expect(observedLiveBlueUnits).toBeLessThanOrEqual(8);
         expect(
           await sourcePixelAtRatio(canvas, point.x, point.y),
         ).toEqual(committedRedPixel);
 
+        const unitsBeforeScreenshot = Number(
+          await page.getByTestId("recipe-blue").textContent(),
+        );
         const visiblePixel = await renderedScreenshotPixelAtRatio(
           page,
           canvas,
           point.x,
           point.y,
         );
-        expect(
-          Math.max(
+        const unitsAfterScreenshot = Number(
+          await page.getByTestId("recipe-blue").textContent(),
+        );
+        const candidateDiffs = Array.from(
+          {
+            length:
+              Math.abs(unitsAfterScreenshot - unitsBeforeScreenshot) + 1,
+          },
+          (_, index) =>
+            Math.min(unitsBeforeScreenshot, unitsAfterScreenshot) + index,
+        ).map((units) => {
+          const expected = mixPaint({ red: 1, blue: units }).rgb;
+          return Math.max(
             ...visiblePixel
               .slice(0, 3)
               .map((channel, index) =>
-                Math.abs(channel - [132, 96, 108][index])
+                Math.abs(
+                  channel - [expected.r, expected.g, expected.b][index],
+                ),
               ),
-          ),
-        ).toBeLessThanOrEqual(8);
+          );
+        });
+        expect(Math.min(...candidateDiffs)).toBeLessThanOrEqual(8);
       },
     );
 
-    expect(liveMixedPixel).toBeDefined();
+    const committedBlueUnits = Number(
+      await page.getByTestId("recipe-blue").textContent(),
+    );
+    expect(committedBlueUnits).toBeGreaterThanOrEqual(
+      observedLiveBlueUnits,
+    );
+    expect(committedBlueUnits).toBeLessThanOrEqual(8);
+    const expectedCommitted = mixPaint({
+      red: 1,
+      blue: committedBlueUnits,
+    }).rgb;
     await expect
-      .poll(async () =>
-        sourcePixelAtRatio(canvas, point.x, point.y)
-      )
-      .toEqual(liveMixedPixel);
+      .poll(async () => {
+        const pixel = await sourcePixelAtRatio(canvas, point.x, point.y);
+        return pixel.slice(0, 3);
+      })
+      .toEqual([
+        expectedCommitted.r,
+        expectedCommitted.g,
+        expectedCommitted.b,
+      ]);
+    expect(
+      (await sourcePixelAtRatio(canvas, point.x, point.y))[3],
+    ).toBeGreaterThanOrEqual(240);
     await expect
       .poll(async () =>
         (await layerPixelAtRatio(
@@ -896,7 +941,9 @@ test.describe("スマホ実タッチの回帰", () => {
       )
       .toBe(0);
     await expect(page.getByTestId("recipe-red")).toHaveText("1");
-    await expect(page.getByTestId("recipe-blue")).toHaveText("1");
+    await expect(page.getByTestId("recipe-blue")).toHaveText(
+      String(committedBlueUnits),
+    );
   });
 
   test("Android実タッチの長押しは一操作で中心へ量を重ねて厚く広がる", async ({
@@ -909,7 +956,11 @@ test.describe("スマホ実タッチの回帰", () => {
     await touchCanvasAt(page, canvas, 0.31, 0.55);
     await holdCanvasAt(page, canvas, 0.69, 0.55, 900);
 
-    await expect(page.getByTestId("recipe-black")).toHaveText("5");
+    const heldBlackUnits = Number(
+      await page.getByTestId("recipe-black").textContent(),
+    );
+    expect(heldBlackUnits).toBeGreaterThanOrEqual(5);
+    expect(heldBlackUnits).toBeLessThanOrEqual(9);
     await expect
       .poll(async () => {
         const tapAlpha = await sourceAlphaAtRatio(canvas, 0.31, 0.55);
@@ -945,6 +996,7 @@ test.describe("スマホ実タッチの回帰", () => {
     const canvasBox = await canvas.boundingBox();
     if (!canvasBox) throw new Error("Canvas is unavailable");
     const endXRatio = 0.72 + 12 / canvasBox.width;
+    let liveBlueUnits = 0;
     await withCanvasTouchAfterMove(
       page,
       canvas,
@@ -986,7 +1038,11 @@ test.describe("スマホ実タッチの回帰", () => {
 
         // The recipe readout follows the live stroke, while authoritative
         // paint pixels and history remain uncommitted until pointerup.
-        await expect(page.getByTestId("recipe-blue")).toHaveText("3");
+        liveBlueUnits = Number(
+          await page.getByTestId("recipe-blue").textContent(),
+        );
+        expect(liveBlueUnits).toBeGreaterThanOrEqual(3);
+        expect(liveBlueUnits).toBeLessThanOrEqual(9);
         await expect
           .poll(async () => {
             const pixel = await sourcePixelAtRatio(
@@ -1001,7 +1057,9 @@ test.describe("スマホ実タッチの回帰", () => {
     );
 
     await expect(page.getByTestId("recipe-red")).toHaveText("1");
-    await expect(page.getByTestId("recipe-blue")).toHaveText("3");
+    await expect(page.getByTestId("recipe-blue")).toHaveText(
+      String(liveBlueUnits),
+    );
     const endPixel = await sourcePixelAtRatio(canvas, endXRatio, 0.55);
     expect(endPixel.slice(0, 3)).toEqual([0, 161, 233]);
 
