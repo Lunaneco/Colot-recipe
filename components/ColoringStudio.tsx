@@ -39,6 +39,7 @@ import {
   useCanvasPan,
   useCanvasViewport,
 } from "./CanvasViewport";
+import { CurrentPaintPicker } from "./CurrentPaintPicker";
 
 type ColoringStudioProps = {
   color: MixedColorSnapshot;
@@ -1063,43 +1064,15 @@ export function ColoringStudio({
   return (
     <div className="studio studio--coloring" data-testid="coloring-studio">
       <div className="mode-toolbar">
-        <div className="current-paint">
-          <button
-            type="button"
-            className="current-paint__swatch"
-            style={{
-              "--current-paint": color.hex,
-              "--current-opacity": Math.max(0.45, color.opacity),
-            } as React.CSSProperties}
-            onClick={onOpenPalette}
-            aria-label={`現在の色は${colorName}。保存パレットから変更`}
+        <div className="mode-toolbar__primary">
+          <CurrentPaintPicker
+            color={color}
+            colorName={colorName}
+            label="ぬりえの色"
+            testId="coloring-color-picker"
+            onOpenPalette={onOpenPalette}
           />
-          <div>
-            <span>ぬりえの色</span>
-            <strong>{colorName}</strong>
-          </div>
-        </div>
-        <div className="paint-mode-switch" role="group" aria-label="塗り方">
-          <button
-            type="button"
-            className={paintMode === "fill" ? "is-selected" : ""}
-            aria-pressed={paintMode === "fill"}
-            onClick={() => setPaintMode("fill")}
-          >
-            <Grid2X2Plus size={17} aria-hidden="true" />
-            タップで枠内を塗る
-          </button>
-          <button
-            type="button"
-            className={paintMode === "brush" ? "is-selected" : ""}
-            aria-pressed={paintMode === "brush"}
-            onClick={() => setPaintMode("brush")}
-          >
-            <Brush size={17} aria-hidden="true" />
-            ブラシで塗る
-          </button>
-        </div>
-        <div className="toolbar-actions">
+          <div className="toolbar-actions">
           <button
             type="button"
             aria-label="戻す"
@@ -1134,6 +1107,27 @@ export function ColoringStudio({
             onClick={() => setMobileInspectorOpen(true)}
           >
             <SlidersHorizontal size={17} aria-hidden="true" /> <span>調整</span>
+          </button>
+          </div>
+        </div>
+        <div className="paint-mode-switch" role="group" aria-label="塗り方">
+          <button
+            type="button"
+            className={paintMode === "fill" ? "is-selected" : ""}
+            aria-pressed={paintMode === "fill"}
+            onClick={() => setPaintMode("fill")}
+          >
+            <Grid2X2Plus size={17} aria-hidden="true" />
+            タップで枠内を塗る
+          </button>
+          <button
+            type="button"
+            className={paintMode === "brush" ? "is-selected" : ""}
+            aria-pressed={paintMode === "brush"}
+            onClick={() => setPaintMode("brush")}
+          >
+            <Brush size={17} aria-hidden="true" />
+            ブラシで塗る
           </button>
         </div>
       </div>

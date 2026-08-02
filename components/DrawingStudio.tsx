@@ -59,6 +59,7 @@ import {
   useCanvasPan,
   useCanvasViewport,
 } from "./CanvasViewport";
+import { CurrentPaintPicker } from "./CurrentPaintPicker";
 
 type DrawingStudioProps = {
   color: MixedColorSnapshot;
@@ -1265,23 +1266,15 @@ export function DrawingStudio({
   return (
     <div className="studio studio--draw" data-testid="drawing-studio">
       <div className="mode-toolbar">
-        <div className="current-paint">
-          <button
-            type="button"
-            className="current-paint__swatch"
-            style={{
-              "--current-paint": color.hex,
-              "--current-opacity": Math.max(0.45, color.opacity),
-            } as React.CSSProperties}
-            onClick={onOpenPalette}
-            aria-label={`現在の色は${colorName}。保存パレットから変更`}
+        <div className="mode-toolbar__primary">
+          <CurrentPaintPicker
+            color={color}
+            colorName={colorName}
+            label="現在の色"
+            testId="drawing-color-picker"
+            onOpenPalette={onOpenPalette}
           />
-          <div>
-            <span>現在の色</span>
-            <strong>{colorName}</strong>
-          </div>
-        </div>
-        <div className="toolbar-actions">
+          <div className="toolbar-actions">
           <span className="autosave-state" aria-live="polite">
             <Save size={14} aria-hidden="true" />
             {saveState === "saving"
@@ -1359,6 +1352,7 @@ export function DrawingStudio({
           >
             <Download size={17} aria-hidden="true" /> <span>PNG保存</span>
           </button>
+          </div>
         </div>
       </div>
 

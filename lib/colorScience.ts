@@ -6,26 +6,28 @@ import {
   type PigmentId,
 } from "./types";
 import {
-  CIE_1964_10_DEGREE_X,
-  CIE_1964_10_DEGREE_Y,
-  CIE_1964_10_DEGREE_Z,
+  CIE_1931_2_DEGREE_X,
+  CIE_1931_2_DEGREE_Y,
+  CIE_1931_2_DEGREE_Z,
   CIE_STANDARD_ILLUMINANT_D65,
 } from "./cieD65";
 import {
   PAINT_CALIBRATION,
   PAINT_CALIBRATION_WAVELENGTHS_NM,
+  SAUNDERSON_K1,
+  SAUNDERSON_K2,
 } from "./paintCalibration";
 
 /**
  * A deterministic, measured-data subtractive-colour engine for the palette.
  *
- * Four pigments use Golden Heavy Body measured reflectance and K/S data at 31
- * samples (400–700 nm); white is the explicitly documented K/S=0 scattering
- * reference because that shared workbook contains no Titanium White row.
- * Relative paint parts are mixed in single-constant Kubelka–Munk space, then
- * converted with the source's CIE 1964 10°/D65 colorimetry and adapted to the
- * standard sRGB D65 white point. This is deliberately different from averaging
- * RGB triplets: pigments remove overlapping regions of the spectrum.
+ * Five Golden Heavy Body artist paints use RIT-derived absorption K and
+ * scattering S curves at 38 samples (380–750 nm). Relative paint parts combine
+ * K and S separately under Duncan's ideal-mixture approximation, then the
+ * opaque two-constant Kubelka–Munk result receives the profile's Saunderson
+ * surface correction and is integrated under D65 with the CIE 1931 2° observer.
+ * This is deliberately different from averaging RGB triplets: pigments absorb
+ * and scatter overlapping wavelength bands at different strengths.
  */
 
 /** Backward-compatible names retained for callers of the colour engine. */
@@ -78,12 +80,35 @@ const clamp = (value: number, minimum = 0, maximum = 1) =>
   Math.min(maximum, Math.max(minimum, value));
 
 const kmRatioToInternalReflectance = (ratio: number) =>
-  clamp(1 + ratio - Math.sqrt(ratio * ratio + 2 * ratio));
+  clamp(1 / (1 + ratio + Math.sqrt(ratio * ratio + 2 * ratio)));
 
 /**
- * Pure-paint reflectances reconstructed from the source K/S profile. Small
- * differences from the source's rounded percent-reflectance columns are
- * expected because its K/S values carry different decimal precision.
+ * Convert internal diffuse reflectance using Wacton.Unicolour's specular-
+ * excluded rendering assumption. The RIT source data were measured in SPIN;
+ * the direct k1 term is absent here because SPEX is the selected display
+ * geometry, not because it was the original measurement mode.
+ */
+const applySaundersonCorrection = (internalReflectance: number) =>
+  clamp(
+    ((1 - SAUNDERSON_K1) *
+      (1 - SAUNDERSON_K2) *
+      internalReflectance) /
+      (1 - SAUNDERSON_K2 * internalReflectance),
+  );
+
+const kmCoefficientsToReflectance = (
+  absorptionK: number,
+  scatteringS: number,
+) => {
+  if (scatteringS <= 0) return 0;
+  return applySaundersonCorrection(
+    kmRatioToInternalReflectance(absorptionK / scatteringS),
+  );
+};
+
+/**
+ * Pure-paint reflectances reconstructed from each measured-derived K and S
+ * profile, including the same Saunderson surface correction used for mixtures.
  */
 export const PIGMENT_REFLECTANCE: Readonly<
   Record<PigmentKey, readonly number[]>
@@ -94,11 +119,21 @@ export const PIGMENT_REFLECTANCE: Readonly<
       return [
         pigment,
         Object.freeze(
-          calibration.ks.map(kmRatioToInternalReflectance),
+          calibration.absorptionK.map((absorptionK, wavelengthIndex) =>
+            kmCoefficientsToReflectance(
+              absorptionK,
+              calibration.scatteringS[wavelengthIndex],
+            )
+          ),
         ),
       ];
     }),
   ) as Record<PigmentKey, readonly number[]>,
+);
+
+/** A neutral unit reflector for the pigment-free reflectance API. */
+const NO_PIGMENT_REFLECTANCE = Object.freeze(
+  PAINT_CALIBRATION_WAVELENGTHS_NM.map(() => 1),
 );
 
 const normaliseUnits = (
@@ -147,21 +182,29 @@ const mixReflectance = (
     0,
   );
 
-  if (pigmentUnits === 0) return PIGMENT_REFLECTANCE.white;
+  if (pigmentUnits === 0) return NO_PIGMENT_REFLECTANCE;
 
-  // The shared workbook supplies one K/S curve per complete paint. Under the
-  // single-constant Kubelka–Munk assumption, recipe shares linearly combine
-  // those K/S values before the standard inverse maps them to reflectance.
+  // Duncan's ideal-mixture approximation is applied to complete-paint shares:
+  // Kmix = ΣciKi and Smix = ΣciSi. Averaging K/S directly would incorrectly
+  // assume every pigment has the same scattering power, especially damaging
+  // white tints and mixtures involving strongly scattering inorganic colours.
   return PAINT_CALIBRATION_WAVELENGTHS_NM.map((_, wavelengthIndex) => {
-    let mixedKs = 0;
+    let mixedK = 0;
+    let mixedS = 0;
 
     for (const pigment of PIGMENT_IDS) {
       const units = recipe[pigment];
       if (units === 0) continue;
-      mixedKs += units * PAINT_CALIBRATION[pigment].ks[wavelengthIndex];
+      mixedK +=
+        units * PAINT_CALIBRATION[pigment].absorptionK[wavelengthIndex];
+      mixedS +=
+        units * PAINT_CALIBRATION[pigment].scatteringS[wavelengthIndex];
     }
 
-    return kmRatioToInternalReflectance(mixedKs / pigmentUnits);
+    return kmCoefficientsToReflectance(
+      mixedK / pigmentUnits,
+      mixedS / pigmentUnits,
+    );
   });
 };
 
@@ -184,11 +227,11 @@ const spectralNormalizer =
   1 /
   CIE_STANDARD_ILLUMINANT_D65.reduce(
     (total, illuminant, index) =>
-      total + illuminant * CIE_1964_10_DEGREE_Y[index],
+      total + illuminant * CIE_1931_2_DEGREE_Y[index],
     0,
   );
 
-const spectrumToXyz10Degree = (
+const spectrumToXyz2Degree = (
   reflectance: readonly number[],
 ): XYZColor => {
   if (reflectance.length !== PAINT_CALIBRATION_WAVELENGTHS_NM.length) {
@@ -206,74 +249,18 @@ const spectrumToXyz10Degree = (
       reflectance[index] *
       CIE_STANDARD_ILLUMINANT_D65[index] *
       spectralNormalizer;
-    x += stimulus * CIE_1964_10_DEGREE_X[index];
-    y += stimulus * CIE_1964_10_DEGREE_Y[index];
-    z += stimulus * CIE_1964_10_DEGREE_Z[index];
+    x += stimulus * CIE_1931_2_DEGREE_X[index];
+    y += stimulus * CIE_1931_2_DEGREE_Y[index];
+    z += stimulus * CIE_1931_2_DEGREE_Z[index];
   }
 
   return { x, y, z };
 };
 
-const multiplyMatrix3 = (
-  matrix: readonly (readonly [number, number, number])[],
-  value: readonly [number, number, number],
-): [number, number, number] => [
-  matrix[0][0] * value[0] +
-    matrix[0][1] * value[1] +
-    matrix[0][2] * value[2],
-  matrix[1][0] * value[0] +
-    matrix[1][1] * value[1] +
-    matrix[1][2] * value[2],
-  matrix[2][0] * value[0] +
-    matrix[2][1] * value[1] +
-    matrix[2][2] * value[2],
-];
-
-const BRADFORD = [
-  [0.8951, 0.2664, -0.1614],
-  [-0.7502, 1.7135, 0.0367],
-  [0.0389, -0.0685, 1.0296],
-] as const;
-const BRADFORD_INVERSE = [
-  [0.9869929, -0.1470543, 0.1599627],
-  [0.4323053, 0.5183603, 0.0492912],
-  [-0.0085287, 0.0400428, 0.9684867],
-] as const;
-const SRGB_D65_WHITE_XYZ = [0.95047, 1, 1.08883] as const;
-const SOURCE_D65_WHITE_XYZ = spectrumToXyz10Degree(
-  PAINT_CALIBRATION_WAVELENGTHS_NM.map(() => 1),
-);
-const SOURCE_D65_WHITE_CONE = multiplyMatrix3(BRADFORD, [
-  SOURCE_D65_WHITE_XYZ.x,
-  SOURCE_D65_WHITE_XYZ.y,
-  SOURCE_D65_WHITE_XYZ.z,
-]);
-const SRGB_D65_WHITE_CONE = multiplyMatrix3(
-  BRADFORD,
-  SRGB_D65_WHITE_XYZ,
-);
-
-/**
- * The workbook's supplied Lab condition is CIE 1964 10°, while standard sRGB
- * uses the CIE 1931 2° D65 white point. Bradford adaptation prevents a neutral
- * reflector from acquiring a cast when those definitions meet.
- */
-const adaptXyz10DegreeToSrgbWhite = ({ x, y, z }: XYZColor): XYZColor => {
-  const sourceCone = multiplyMatrix3(BRADFORD, [x, y, z]);
-  const adapted = multiplyMatrix3(BRADFORD_INVERSE, [
-    sourceCone[0] * (SRGB_D65_WHITE_CONE[0] / SOURCE_D65_WHITE_CONE[0]),
-    sourceCone[1] * (SRGB_D65_WHITE_CONE[1] / SOURCE_D65_WHITE_CONE[1]),
-    sourceCone[2] * (SRGB_D65_WHITE_CONE[2] / SOURCE_D65_WHITE_CONE[2]),
-  ]);
-  return { x: adapted[0], y: adapted[1], z: adapted[2] };
-};
-
 const spectrumToLinearRgb = (
   reflectance: readonly number[],
 ): LinearRGBColor => {
-  const { x, y, z } = adaptXyz10DegreeToSrgbWhite(
-    spectrumToXyz10Degree(reflectance),
-  );
+  const { x, y, z } = spectrumToXyz2Degree(reflectance);
 
   // CIE XYZ D65 -> linear sRGB, using the high-precision CSS Color 4 matrix.
   return {
@@ -292,14 +279,17 @@ const spectrumToLinearRgb = (
   };
 };
 
-const encodeSrgb = (channel: number) => {
+const encodeSrgbFloat = (channel: number) => {
   const clipped = clamp(channel);
   const encoded =
     clipped <= 0.0031308
       ? 12.92 * clipped
       : 1.055 * clipped ** (1 / 2.4) - 0.055;
-  return Math.round(clamp(encoded) * 255);
+  return clamp(encoded) * 255;
 };
+
+const encodeSrgb = (channel: number) =>
+  Math.round(encodeSrgbFloat(channel));
 
 const linearRgbToRgb = ({ r, g, b }: LinearRGBColor): RGBColor =>
   ({
@@ -445,17 +435,23 @@ const DISPLAY_ENDPOINTS_OKLAB = Object.freeze(
   ) as Record<PigmentKey, OKLabColor>,
 );
 
+const DISPLAY_WHITE_LINEAR = rgbToLinearRgb(
+  hexToRgb(MATERIAL_COLORS.white),
+);
+
+const linearRelativeLuminance = ({ r, g, b }: LinearRGBColor) =>
+  0.2126 * r + 0.7152 * g + 0.0722 * b;
+
 /**
- * The measured Golden paints and the app's previously specified pure swatches
- * are different colour definitions: an sRGB HEX cannot identify a pigment.
- * The display rendering starts with the share-weighted specified endpoints,
- * then restores the measured spectral interaction residual as two or more
- * chromatic pigments meet. Its strength rises continuously with chromatic
- * diversity and falls with white/black dilution. This preserves intuitive,
- * monotonic tints and shades without turning red+blue into an RGB average.
- * The physical reflectance export is never changed by this rendering intent.
+ * A display HEX does not identify a physical pigment, but the app's pure red,
+ * blue, yellow, black, and white endpoints are an established UI contract.
+ * We therefore add only the recipe-share-weighted endpoint offsets in OKLab.
+ * In this raw calibration the full spectral interaction residual remains
+ * intact. The white-tint wrapper below additionally constrains the final
+ * quantised display path; neither display operation changes the exported
+ * physical reflectance.
  */
-const calibrateDisplayEndpoints = (
+const calibrateDisplayEndpointsRaw = (
   recipe: Required<PaintRecipe>,
   physicalLinear: LinearRGBColor,
 ): LinearRGBColor => {
@@ -483,31 +479,179 @@ const calibrateDisplayEndpoints = (
     displayBarycentre.b += share * displayEndpoint.b;
   }
 
-  const chromaticUnits = recipe.red + recipe.blue + recipe.yellow;
-  const chromaticShare = chromaticUnits / pigmentUnits;
-  const chromaticDiversity =
-    chromaticUnits === 0
-      ? 0
-      : 1 -
-        (["red", "blue", "yellow"] as const).reduce(
-          (sum, pigment) =>
-            sum + (recipe[pigment] / chromaticUnits) ** 2,
-          0,
-        );
-  const interactionStrength =
-    clamp(chromaticDiversity * 2) * chromaticShare;
   const calibrated = {
-    l:
-      displayBarycentre.l +
-      (physical.l - physicalBarycentre.l) * interactionStrength,
-    a:
-      displayBarycentre.a +
-      (physical.a - physicalBarycentre.a) * interactionStrength,
-    b:
-      displayBarycentre.b +
-      (physical.b - physicalBarycentre.b) * interactionStrength,
+    l: physical.l + displayBarycentre.l - physicalBarycentre.l,
+    a: physical.a + displayBarycentre.a - physicalBarycentre.a,
+    b: physical.b + displayBarycentre.b - physicalBarycentre.b,
   };
   return gamutMapOklabToLinearSrgb(calibrated);
+};
+
+/**
+ * Match a target display luminance while retaining the calibrated spectral
+ * chromaticity. Darkening scales linear RGB; lightening mixes only as far
+ * toward the established display white as the physical luminance requires.
+ */
+const setLinearLuminance = (
+  colour: LinearRGBColor,
+  targetLuminance: number,
+): LinearRGBColor => {
+  const currentLuminance = linearRelativeLuminance(colour);
+  const target = clamp(targetLuminance, 0, 1);
+
+  if (Math.abs(currentLuminance - target) <= 1e-12) return colour;
+  if (currentLuminance > target && currentLuminance > Number.EPSILON) {
+    const scale = target / currentLuminance;
+    return {
+      r: clamp(colour.r * scale),
+      g: clamp(colour.g * scale),
+      b: clamp(colour.b * scale),
+    };
+  }
+
+  const whiteLuminance = linearRelativeLuminance(DISPLAY_WHITE_LINEAR);
+  if (whiteLuminance <= currentLuminance + Number.EPSILON) return colour;
+  const amount = clamp(
+    (target - currentLuminance) / (whiteLuminance - currentLuminance),
+  );
+  return {
+    r: clamp(colour.r + (DISPLAY_WHITE_LINEAR.r - colour.r) * amount),
+    g: clamp(colour.g + (DISPLAY_WHITE_LINEAR.g - colour.g) * amount),
+    b: clamp(colour.b + (DISPLAY_WHITE_LINEAR.b - colour.b) * amount),
+  };
+};
+
+/**
+ * Quantise a luminance-corrected colour inside a fixed ±4-code neighbourhood.
+ * Selecting the brightest neighbour that does not exceed the physical target
+ * removes visible one-channel rounding reversals while tightly bounding hue
+ * displacement. Blue is solved directly for each nearby red/green pair, so
+ * this remains an O(1) local search rather than a per-recipe tint lookup table.
+ */
+const quantizeAtOrBelowLuminance = (
+  colour: LinearRGBColor,
+  targetLuminance: number,
+): RGBColor => {
+  const encoded = {
+    r: encodeSrgbFloat(colour.r),
+    g: encodeSrgbFloat(colour.g),
+    b: encodeSrgbFloat(colour.b),
+  };
+  const target = clamp(targetLuminance, 0, 1);
+  let best:
+    | { rgb: RGBColor; luminance: number; distance: number }
+    | undefined;
+  const channelRange = (channel: number) => ({
+    minimum: Math.max(0, Math.floor(channel) - 4),
+    maximum: Math.min(255, Math.ceil(channel) + 4),
+  });
+  const redRange = channelRange(encoded.r);
+  const greenRange = channelRange(encoded.g);
+  const blueRange = channelRange(encoded.b);
+
+  for (let red = redRange.minimum; red <= redRange.maximum; red += 1) {
+    const redLinear = decodeSrgb(red);
+    for (
+      let green = greenRange.minimum;
+      green <= greenRange.maximum;
+      green += 1
+    ) {
+      const greenLinear = decodeSrgb(green);
+      const desiredBlueLinear =
+        (target - 0.2126 * redLinear - 0.7152 * greenLinear) / 0.0722;
+      const desiredBlue = Math.floor(encodeSrgbFloat(desiredBlueLinear));
+      const blue = Math.min(
+        blueRange.maximum,
+        Math.max(blueRange.minimum, desiredBlue),
+      );
+      const rgb = { r: red, g: green, b: blue };
+      const luminance = linearRelativeLuminance(rgbToLinearRgb(rgb));
+      if (luminance > target + 1e-12) continue;
+      const distance =
+        (red - encoded.r) ** 2 +
+        (green - encoded.g) ** 2 +
+        (blue - encoded.b) ** 2;
+      if (
+        !best ||
+        luminance > best.luminance + 1e-12 ||
+        (Math.abs(luminance - best.luminance) <= 1e-12 &&
+          distance < best.distance)
+      ) {
+        best = { rgb, luminance, distance };
+      }
+    }
+  }
+
+  return best?.rgb ?? linearRgbToRgb(colour);
+};
+
+/**
+ * Preserve the measured lightening caused by Titanium White after endpoint
+ * calibration. The target luminance follows the physical two-constant
+ * spectrum from the same pigment mixture to measured PW6. Final 8-bit
+ * quantisation is selected locally to suppress visible rounding reversals
+ * without replacing the wavelength-dependent hue/chroma result.
+ */
+const calibrateDisplayEndpoints = (
+  recipe: Required<PaintRecipe>,
+  physicalLinear: LinearRGBColor,
+): LinearRGBColor => {
+  const calibrated = calibrateDisplayEndpointsRaw(recipe, physicalLinear);
+  const nonWhiteUnits = PIGMENT_IDS.reduce(
+    (total, pigment) =>
+      pigment === "white" ? total : total + recipe[pigment],
+    0,
+  );
+  if (recipe.white === 0 || nonWhiteUnits === 0) {
+    return calibrated;
+  }
+
+  const baseRecipe: Required<PaintRecipe> = { ...recipe, white: 0 };
+  const basePhysicalLinear = spectrumToLinearRgb(mixReflectance(baseRecipe));
+  const whitePhysicalLinear = spectrumToLinearRgb(
+    PIGMENT_REFLECTANCE.white,
+  );
+  const basePhysicalLuminance = linearRelativeLuminance(basePhysicalLinear);
+  const whitePhysicalLuminance = linearRelativeLuminance(whitePhysicalLinear);
+  const physicalRange = whitePhysicalLuminance - basePhysicalLuminance;
+  const progress = physicalRange > Number.EPSILON
+    ? clamp(
+        (linearRelativeLuminance(physicalLinear) - basePhysicalLuminance) /
+          physicalRange,
+      )
+    : recipe.white / (recipe.white + nonWhiteUnits);
+
+  const baseDisplay = calibrateDisplayEndpointsRaw(
+    baseRecipe,
+    basePhysicalLinear,
+  );
+  const continuousBaseLuminance = linearRelativeLuminance(baseDisplay);
+  const continuousTargetLuminance =
+    continuousBaseLuminance +
+    progress * (linearRelativeLuminance(DISPLAY_WHITE_LINEAR) -
+      continuousBaseLuminance);
+  const luminanceCorrected = setLinearLuminance(
+    calibrated,
+    continuousTargetLuminance,
+  );
+
+  // Quantisation is anchored separately to the exact 8-bit colour shown at
+  // white = 0. Keeping this out of the continuous correction guarantees that
+  // an infinitesimal white share converges to the unmodified spectral base.
+  const quantizedBaseLuminance = linearRelativeLuminance(
+    rgbToLinearRgb(linearRgbToRgb(baseDisplay)),
+  );
+  const whiteDisplayLuminance = linearRelativeLuminance(DISPLAY_WHITE_LINEAR);
+  const quantizedTargetLuminance =
+    quantizedBaseLuminance +
+    progress * (whiteDisplayLuminance - quantizedBaseLuminance);
+
+  return rgbToLinearRgb(
+    quantizeAtOrBelowLuminance(
+      luminanceCorrected,
+      quantizedTargetLuminance,
+    ),
+  );
 };
 
 export const rgbToHsl = ({ r, g, b }: RGBColor): HSLColor => {
@@ -597,8 +741,11 @@ const suggestJapaneseName = (
     return "深い森の緑";
   }
   if (hasRedBlue) {
-    if (whiteShare > 0.25) return "藤色ミルク";
-    return "薄明の紫";
+    const readsAsPurple = hsl.h >= 250 && hsl.h <= 345;
+    if (whiteShare > 0.25) {
+      return readsAsPurple ? "藤色ミルク" : "くすみローズ";
+    }
+    return readsAsPurple ? "薄明の紫" : "深いえんじ";
   }
   if (red > 0 && blue === 0 && yellow === 0 && black === 0) {
     if (whiteShare > 0.2) return "ミルクいちご";

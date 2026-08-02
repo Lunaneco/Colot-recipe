@@ -180,7 +180,7 @@ test("保存層のIDB空読み・フォールバック・失敗通知", async (t
     const colors = await loadColors();
     assert.equal(colors.length, 1);
     assert.equal(colors[0].id, "orange");
-    assert.equal(colors[0].mixed.hex, "#E76632");
+    assert.equal(colors[0].mixed.hex, "#E2573F");
     assert.equal(await loadSetting("last-mode"), "draw");
   });
 

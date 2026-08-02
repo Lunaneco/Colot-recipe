@@ -1319,14 +1319,40 @@ test.describe("スマホ実タッチの回帰", () => {
     await saveSingleColor(page, "blue", "スマホ青");
 
     await touchElement(page, page.getByTestId("mode-draw"));
-    await touchElement(
-      page,
-      page.getByRole("button", {
-        name: "現在の色はスマホ青。保存パレットから変更",
-      }),
+    const drawingColorPicker = page.getByTestId("drawing-color-picker");
+    await expect(drawingColorPicker).toHaveAccessibleName(
+      "現在の色はスマホ青。保存パレットから変更",
     );
+    await expect(drawingColorPicker).toHaveAttribute(
+      "aria-controls",
+      "saved-palette-panel",
+    );
+    await expect(drawingColorPicker).toContainText("現在の色");
+    await expect(drawingColorPicker).toContainText("スマホ青");
+    await expect(drawingColorPicker).toContainText("色を変える");
+    const drawingPickerGeometry = await drawingColorPicker.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        left: rect.left,
+        right: rect.right,
+        width: rect.width,
+        height: rect.height,
+        viewportWidth: window.innerWidth,
+        touchAction: getComputedStyle(element).touchAction,
+      };
+    });
+    expect(drawingPickerGeometry.height).toBeGreaterThanOrEqual(44);
+    expect(drawingPickerGeometry.left).toBeGreaterThanOrEqual(0);
+    expect(drawingPickerGeometry.right).toBeLessThanOrEqual(
+      drawingPickerGeometry.viewportWidth,
+    );
+    expect(drawingPickerGeometry.touchAction).toBe("manipulation");
+    await touchElement(page, drawingColorPicker);
     const palette = page.getByTestId("saved-palette");
     await expect(palette).toHaveClass(/\bis-open\b/);
+    await expect(
+      page.getByTestId("saved-color-0").locator(".saved-swatch__selected"),
+    ).toHaveText("選択中");
 
     const red = page.getByTestId("saved-color-1");
     const redMobileSafety = await red.evaluate((element) => {
@@ -1346,9 +1372,12 @@ test.describe("スマホ実タッチの回帰", () => {
     await expect(red).toHaveAttribute("aria-pressed", "true");
     await expect(palette).not.toHaveClass(/\bis-open\b/);
     await expect(
-      page.getByRole("button", {
-        name: "現在の色はスマホ赤。保存パレットから変更",
-      }),
+      drawingColorPicker,
+    ).toHaveAccessibleName(
+      "現在の色はスマホ赤。保存パレットから変更",
+    );
+    await expect(
+      drawingColorPicker,
     ).toBeVisible();
 
     const drawingCanvas = page.getByTestId("drawing-canvas");
@@ -1361,20 +1390,28 @@ test.describe("スマホ実タッチの回帰", () => {
       .toBeGreaterThan(220);
 
     await touchElement(page, page.getByTestId("mode-color"));
-    await touchElement(
-      page,
-      page.getByRole("button", {
-        name: "現在の色はスマホ赤。保存パレットから変更",
-      }),
+    const coloringColorPicker = page.getByTestId("coloring-color-picker");
+    await expect(coloringColorPicker).toHaveAccessibleName(
+      "現在の色はスマホ赤。保存パレットから変更",
     );
+    await expect(coloringColorPicker).toContainText("ぬりえの色");
+    await expect(coloringColorPicker).toContainText("スマホ赤");
+    await expect(coloringColorPicker).toContainText("色を変える");
+    await touchElement(page, coloringColorPicker);
+    await expect(
+      page.getByTestId("saved-color-1").locator(".saved-swatch__selected"),
+    ).toHaveText("選択中");
     const blue = page.getByTestId("saved-color-0");
     await touchElementAt(blue.locator(".saved-swatch__paint"), 0.8, 0.25);
     await expect(blue).toHaveAttribute("aria-pressed", "true");
     await expect(palette).not.toHaveClass(/\bis-open\b/);
     await expect(
-      page.getByRole("button", {
-        name: "現在の色はスマホ青。保存パレットから変更",
-      }),
+      coloringColorPicker,
+    ).toHaveAccessibleName(
+      "現在の色はスマホ青。保存パレットから変更",
+    );
+    await expect(
+      coloringColorPicker,
     ).toBeVisible();
 
     const coloringCanvas = page.getByTestId("coloring-canvas");
@@ -1387,10 +1424,9 @@ test.describe("スマホ実タッチの回帰", () => {
 
     await touchElement(
       page,
-      page.getByRole("button", {
-        name: "現在の色はスマホ青。保存パレットから変更",
-      }),
+      coloringColorPicker,
     );
+    await expect(blue.locator(".saved-swatch__selected")).toHaveText("選択中");
     await touchElement(page, blue);
     await expect(page.getByTestId("recipe-dialog")).toBeVisible();
   });
