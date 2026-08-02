@@ -1471,7 +1471,7 @@ button:disabled {
   position: relative;
   min-width: 0;
   padding: 4px 2px 6px;
-  border: 1px solid transparent;
+  border: 2px solid transparent;
   border-radius: 16px;
   transition:
     border-color 160ms ease,
@@ -1487,6 +1487,7 @@ button:disabled {
 .saved-swatch-wrap.is-selected {
   border-color: var(--action);
   background: color-mix(in srgb, var(--action) 6%, var(--paper-0));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--action) 14%, transparent);
 }
 
 .saved-swatch-wrap.is-pointer-dragged {
@@ -1565,6 +1566,27 @@ button:disabled {
   color: white;
   font-size: 9px;
   font-weight: 800;
+}
+
+.saved-swatch__selected {
+  position: absolute;
+  z-index: 2;
+  right: -8px;
+  bottom: -6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 22px;
+  padding: 0 6px;
+  border: 2px solid var(--paper-0);
+  border-radius: 999px;
+  background: var(--action);
+  color: white;
+  font-family: var(--font-ui);
+  font-size: 8px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .saved-swatch__name {
@@ -1705,19 +1727,56 @@ button:disabled {
   border-radius: var(--radius-card);
 }
 
-.current-paint {
+.mode-toolbar__primary {
   display: flex;
   align-items: center;
-  gap: 9px;
-  flex: 0 0 auto;
-  min-width: 145px;
+  gap: 8px;
+  flex: 1 1 520px;
+  min-width: 0;
 }
 
-.current-paint__swatch {
+.studio-color-picker {
+  display: grid;
+  grid-template-columns: 44px minmax(76px, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  flex: 0 1 312px;
+  min-width: 266px;
+  min-height: 52px;
+  padding: 3px 4px 3px 6px;
+  border: 2px solid color-mix(in srgb, var(--action) 38%, var(--line));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--action) 4%, var(--paper-0));
+  color: var(--ink-800);
+  cursor: pointer;
+  text-align: left;
+  touch-action: manipulation;
+  transition:
+    border-color 150ms ease,
+    background 150ms ease,
+    box-shadow 150ms ease,
+    transform 150ms ease;
+}
+
+.studio-color-picker:hover {
+  border-color: color-mix(in srgb, var(--action) 72%, var(--line));
+  background: color-mix(in srgb, var(--action) 7%, var(--paper-0));
+  box-shadow: 0 4px 12px rgba(0, 116, 168, 0.1);
+}
+
+.studio-color-picker:active {
+  transform: translateY(1px);
+}
+
+.studio-color-picker:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--action) 56%, white);
+  outline-offset: 2px;
+}
+
+.studio-color-picker__swatch {
   position: relative;
   width: 44px;
   height: 44px;
-  padding: 0;
   border: 1px solid rgba(72, 53, 37, 0.24);
   border-radius: 54% 46% 56% 44%;
   background:
@@ -1727,10 +1786,9 @@ button:disabled {
     inset -3px -4px 7px rgba(52, 27, 15, 0.15),
     0 3px 7px rgba(55, 40, 24, 0.11);
   opacity: var(--current-opacity);
-  cursor: pointer;
 }
 
-.current-paint__swatch::after {
+.studio-color-picker__swatch::after {
   position: absolute;
   right: -3px;
   bottom: -3px;
@@ -1742,24 +1800,40 @@ button:disabled {
   content: "";
 }
 
-.current-paint > div {
+.studio-color-picker__copy {
   display: flex;
   min-width: 0;
   flex-direction: column;
 }
 
-.current-paint span {
+.studio-color-picker__copy > span {
   color: var(--ink-500);
   font-size: 9px;
+  font-weight: 700;
 }
 
-.current-paint strong {
-  max-width: 145px;
+.studio-color-picker__copy strong {
+  max-width: 100%;
   overflow: hidden;
-  margin-top: 3px;
+  margin-top: 2px;
   font-family: var(--font-color);
-  font-size: 14px;
+  font-size: 13px;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.studio-color-picker__action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 40px;
+  padding: 0 8px;
+  border-radius: 10px;
+  background: var(--action);
+  color: white;
+  font-size: 10px;
+  font-weight: 800;
   white-space: nowrap;
 }
 
@@ -3110,6 +3184,25 @@ button:disabled {
     padding: 8px;
   }
 
+  .mode-toolbar {
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    min-height: 63px;
+  }
+
+  .studio-color-picker {
+    flex: 1 1 300px;
+  }
+
+  .mode-toolbar__primary {
+    flex-basis: 100%;
+  }
+
+  .studio--coloring .paint-mode-switch {
+    order: 3;
+    flex: 1 0 100%;
+  }
+
   .mix-layout {
     grid-template-columns: minmax(0, 1fr) 238px;
   }
@@ -3491,28 +3584,50 @@ button:disabled {
   }
 
   .mode-toolbar {
+    display: flex;
     align-items: stretch;
     min-height: 60px;
+    flex-direction: column;
     flex: 0 0 auto;
     padding: 7px;
+    overflow: visible;
+  }
+
+  .mode-toolbar__primary {
+    width: 100%;
+    flex: 0 0 auto;
     overflow-x: auto;
+    scrollbar-width: none;
   }
 
-  .current-paint {
-    min-width: 130px;
+  .mode-toolbar__primary::-webkit-scrollbar {
+    display: none;
   }
 
-  .current-paint__swatch {
+  .studio-color-picker {
+    width: 266px;
+    min-width: 266px;
+    min-height: 58px;
+    flex: 0 0 266px;
+  }
+
+  .studio-color-picker__swatch {
     width: 44px;
     height: 44px;
   }
 
-  .current-paint strong {
-    max-width: 95px;
+  .studio-color-picker__copy strong {
+    max-width: 100%;
     font-size: 12px;
   }
 
+  .studio-color-picker__action {
+    min-height: 44px;
+  }
+
   .toolbar-actions {
+    width: auto;
+    flex: 0 0 auto;
     justify-content: flex-start;
   }
 
@@ -3547,6 +3662,12 @@ button:disabled {
     border-radius: 15px;
   }
 
+  .template-rail {
+    display: flex;
+    align-items: stretch;
+    gap: 5px;
+  }
+
   .tool-rail > p,
   .template-rail__heading {
     display: none;
@@ -3558,6 +3679,11 @@ button:disabled {
     gap: 5px;
     overflow-x: auto;
     scrollbar-width: none;
+  }
+
+  .template-grid {
+    flex: 1;
+    min-width: 0;
   }
 
   .tool-grid button {
@@ -3602,12 +3728,13 @@ button:disabled {
   }
 
   .paint-mode-switch {
-    order: 3;
-    min-width: 240px;
+    order: 0;
+    width: 100%;
+    min-width: 0;
   }
 
   .studio--coloring .mode-toolbar {
-    flex-wrap: wrap;
+    flex-direction: column;
   }
 
   .template-grid button {
@@ -3627,8 +3754,15 @@ button:disabled {
   }
 
   .upload-line-button {
+    width: 70px;
     min-height: 44px;
-    margin-top: 5px;
+    flex: 0 0 70px;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 0;
+    padding: 3px;
+    font-size: 7px;
+    line-height: 1.25;
   }
 
   .dialog-layer {

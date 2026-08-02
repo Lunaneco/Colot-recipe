@@ -350,6 +350,9 @@ test("赤3・黄2・白1・水2を作り、履歴・保存・再読込・おえ�
   );
   await savedColor.click();
   await expect(savedColor).toHaveAttribute("aria-pressed", "true");
+  await expect(savedColor.locator(".saved-swatch__selected")).toHaveText(
+    "選択中",
+  );
   await expect(page.getByTestId("recipe-dialog")).toHaveCount(0);
   await expect(savedColor).toHaveAccessibleName(
     `1番 ${TEST_COLOR_NAME}。選択中。もう一度押すとレシピを見る`,
@@ -392,11 +395,20 @@ test("赤3・黄2・白1・水2を作り、履歴・保存・再読込・おえ�
     "true",
   );
   await expect(page.getByTestId("drawing-studio")).toBeVisible();
-  await expect(
-    page.getByRole("button", {
-      name: `現在の色は${TEST_COLOR_NAME}。保存パレットから変更`,
-    }),
-  ).toBeVisible();
+  const drawingColorPicker = page.getByTestId("drawing-color-picker");
+  await expect(drawingColorPicker).toBeVisible();
+  await expect(drawingColorPicker).toHaveAccessibleName(
+    `現在の色は${TEST_COLOR_NAME}。保存パレットから変更`,
+  );
+  await expect(drawingColorPicker).toHaveAttribute(
+    "aria-controls",
+    "saved-palette-panel",
+  );
+  await expect(drawingColorPicker).toContainText("現在の色");
+  await expect(drawingColorPicker).toContainText(TEST_COLOR_NAME);
+  await expect(drawingColorPicker).toContainText("色を変える");
+  const drawingPickerBox = await drawingColorPicker.boundingBox();
+  expect(drawingPickerBox?.height ?? 0).toBeGreaterThanOrEqual(44);
 });
 
 test.describe("スマホ表示", () => {

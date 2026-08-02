@@ -91,13 +91,13 @@ test("同じ場所の顔料量が2対1なら表示色も正確な2対1混色に�
   await clickCanvasAtRatio(canvas, point.x, point.y);
   await expect(page.getByTestId("recipe-blue")).toHaveText("1");
 
-  // The calibrated 2:1 PR254/PB36 profile is #985357. This checks that
+  // The two-constant calibrated 2:1 PR254/PB36 profile is #B0423C. This checks that
   // the renderer receives the exact 2:1 ratio rather than a rounded proxy.
   await expect
     .poll(async () =>
       (await sourcePixelAt(source, point.x, point.y)).slice(0, 3),
     )
-    .toEqual([152, 83, 87]);
+    .toEqual([176, 66, 60]);
 
   await page.getByTestId("material-picker").click();
   await clickCanvasAtRatio(canvas, point.x, point.y);
@@ -119,7 +119,7 @@ test("同じ場所の顔料量が2対1なら表示色も正確な2対1混色に�
   await expect(page.getByTestId("recipe-red")).toHaveText("2");
   await expect(page.getByTestId("recipe-blue")).toHaveText("1");
   await page.getByRole("button", { name: "くわしい数値を見る" }).click();
-  await expect(page.getByTestId("recipe-hex")).toHaveText("#985357");
+  await expect(page.getByTestId("recipe-hex")).toHaveText("#B0423C");
 });
 
 test("水の多いスポイト配合も実際の比率で保存して再現する", async ({

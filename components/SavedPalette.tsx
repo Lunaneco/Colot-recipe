@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Check,
   Download,
   GripVertical,
   Palette,
@@ -394,6 +395,12 @@ export function SavedPalette({
                         } as React.CSSProperties}
                       >
                         <span className="saved-swatch__number">{index + 1}</span>
+                        {selectedId === color.id && (
+                          <span className="saved-swatch__selected" aria-hidden="true">
+                            <Check size={12} />
+                            選択中
+                          </span>
+                        )}
                       </span>
                       <span className="saved-swatch__name">{color.name}</span>
                     </button>
@@ -444,7 +451,9 @@ export function SavedPalette({
           <div className="palette-empty">
             <span className="palette-empty__rings" aria-hidden="true" />
             <p>気に入った色を保存すると、ここに並びます。</p>
-            <small>色をつくって ♡ を押してみましょう</small>
+            <small>
+              「いろをつくる」で色を作り、「この色を登録」を押すと、ここに並びます
+            </small>
           </div>
         )}
 

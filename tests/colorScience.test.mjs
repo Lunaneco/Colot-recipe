@@ -9,7 +9,15 @@ import {
   mixPaintProportions,
   mixPaintProportionsFromRgb,
 } from "../lib/colorScience.ts";
-import { PAINT_CALIBRATION } from "../lib/paintCalibration.ts";
+import {
+  PAINT_CALIBRATION,
+  SAUNDERSON_K1,
+  SAUNDERSON_K2,
+} from "../lib/paintCalibration.ts";
+import {
+  CIE_1931_2_DEGREE_Y,
+  CIE_STANDARD_ILLUMINANT_D65,
+} from "../lib/cieD65.ts";
 import { MATERIAL_COLORS, MATERIAL_LABELS } from "../lib/types.ts";
 
 const channelDistance = (left, right) =>
@@ -29,23 +37,61 @@ const relativeLuminance = ({ r, g, b }) => {
   return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
 };
 
-test("顔料は実測範囲400–700nmの31点反射率として再構成される", () => {
+test("顔料は実測範囲380–750nmの38点反射率として再構成される", () => {
   for (const spectrum of Object.values(PIGMENT_REFLECTANCE)) {
-    assert.equal(spectrum.length, 31);
+    assert.equal(spectrum.length, 38);
     assert.ok(spectrum.every((sample) => sample > 0 && sample <= 1));
   }
 });
 
-test("単一定数Kubelka–Munkは実比率でK/Sを加重する", () => {
+test("顔料ゼロと水だけはTitanium Whiteでなく単位反射率を返す", () => {
+  const empty = mixPaintReflectanceProportions({});
+  const waterOnly = mixPaintReflectanceProportions({ water: 1 });
+
+  assert.ok(empty.every((sample) => sample === 1));
+  assert.deepEqual(waterOnly, empty);
+  assert.notDeepEqual(empty, PIGMENT_REFLECTANCE.white);
+});
+
+test("二定数Kubelka–MunkはKとSを別々に実比率で加重する", () => {
   const wavelengthIndex = 18;
   const spectrum = mixPaintReflectanceProportions({ red: 2, blue: 1 });
-  const ratio =
+  const mixedK =
+    (2 * PAINT_CALIBRATION.red.absorptionK[wavelengthIndex] +
+      PAINT_CALIBRATION.blue.absorptionK[wavelengthIndex]) /
+    3;
+  const mixedS =
+    (2 * PAINT_CALIBRATION.red.scatteringS[wavelengthIndex] +
+      PAINT_CALIBRATION.blue.scatteringS[wavelengthIndex]) /
+    3;
+  const ratio = mixedK / mixedS;
+  const internal =
+    1 / (1 + ratio + Math.sqrt(ratio ** 2 + 2 * ratio));
+  const expected =
+    ((1 - SAUNDERSON_K1) * (1 - SAUNDERSON_K2) * internal) /
+    (1 - SAUNDERSON_K2 * internal);
+  const incorrectSingleConstantRatio =
     (2 * PAINT_CALIBRATION.red.ks[wavelengthIndex] +
       PAINT_CALIBRATION.blue.ks[wavelengthIndex]) /
     3;
-  const expected = 1 + ratio - Math.sqrt(ratio ** 2 + 2 * ratio);
+  const incorrectInternal =
+    1 /
+    (1 +
+      incorrectSingleConstantRatio +
+      Math.sqrt(
+        incorrectSingleConstantRatio ** 2 +
+          2 * incorrectSingleConstantRatio,
+      ));
+  const incorrectSingleConstant =
+    ((1 - SAUNDERSON_K1) *
+      (1 - SAUNDERSON_K2) *
+      incorrectInternal) /
+    (1 - SAUNDERSON_K2 * incorrectInternal);
 
   assert.ok(Math.abs(spectrum[wavelengthIndex] - expected) < 1e-14);
+  assert.ok(
+    Math.abs(spectrum[wavelengthIndex] - incorrectSingleConstant) > 1e-3,
+  );
 });
 
 test("同比率の倍率と材料オブジェクトの順序で混色結果は変わらない", () => {
@@ -198,7 +244,7 @@ test("黒は不透明な絵の具として働き、水では色を変えずに�
 test("赤＋黄はRGB平均ではない自然なオレンジになる", () => {
   const orange = mixPaint({ red: 1, yellow: 1 });
 
-  assert.ok(orange.hsl.h >= 12 && orange.hsl.h <= 52, orange.hex);
+  assert.ok(orange.hsl.h >= 5 && orange.hsl.h <= 52, orange.hex);
   assert.ok(orange.rgb.r > orange.rgb.g);
   assert.ok(orange.rgb.g > orange.rgb.b);
   assert.equal(orange.name, "夕焼けオレンジ");
@@ -242,9 +288,9 @@ test("実測プロファイルの代表配合は校正版スナップショッ�
   const orange = mixPaint({ red: 3, yellow: 2, white: 1, water: 2 });
   const diluted = mixPaint({ red: 3, yellow: 2, white: 1, water: 20 });
 
-  assert.equal(orange.hex, "#E76632");
-  assert.deepEqual(orange.rgb, { r: 231, g: 102, b: 50 });
-  assert.deepEqual(orange.hsl, { h: 17, s: 79, l: 55 });
+  assert.equal(orange.hex, "#E2573F");
+  assert.deepEqual(orange.rgb, { r: 226, g: 87, b: 63 });
+  assert.deepEqual(orange.hsl, { h: 9, s: 74, l: 57 });
   assert.equal(diluted.hex, orange.hex);
   assert.ok(diluted.opacity < orange.opacity);
 });
@@ -258,19 +304,13 @@ test("黄＋青は減法混色の緑になる", () => {
   assert.equal(green.name, "深い森の緑");
 });
 
-test("赤＋青は明るいRGB紫ではなく、深くくすんだ紫になる", () => {
-  const violet = mixPaint({ red: 1, blue: 1 });
+test("赤＋青はRGB平均でなく、実顔料固有の低彩度色になる", () => {
+  const redBlue = mixPaint({ red: 1, blue: 1 });
   const digitalAverage = { r: 128, g: 0, b: 128 };
 
-  assert.ok(
-    violet.hsl.h >= 255 && violet.hsl.h <= 345,
-    `${violet.hex} / ${violet.hsl.h}°`,
-  );
-  assert.ok(violet.rgb.r > violet.rgb.g);
-  assert.ok(violet.rgb.b > violet.rgb.g);
-  assert.ok(violet.hsl.s < 75, `${violet.hsl.s}%`);
-  assert.notDeepEqual(violet.rgb, digitalAverage);
-  assert.equal(violet.name, "薄明の紫");
+  assert.ok(redBlue.hsl.s < 50, `${redBlue.hex} / ${redBlue.hsl.s}%`);
+  assert.notDeepEqual(redBlue.rgb, digitalAverage);
+  assert.equal(redBlue.name, "深いえんじ");
 });
 
 test("三原色を混ぜると二色混合より彩度が下がる", () => {
@@ -295,15 +335,17 @@ test("白は明度と不透明度を上げ、顔料の濃さを下げる", () =>
   assert.equal(pink.name, "ミルクいちご");
 });
 
-test("黒・白を増やした時の表示輝度は逆転しない", () => {
-  const additions = [0, 0.01, 0.05, 0.1, 0.2, 0.5, 1, 2, 4];
+test("黒と白は表示輝度を単調に変え、十分な白は白色端点へ近づける", () => {
+  const additions = [0, 0.01, 0.05, 0.1, 0.2, 0.5, 1, 2, 4, 8, 16, 64];
+  const displayWhite = mixPaint({ white: 1 }).rgb;
+  const distance = (left, right) =>
+    Math.hypot(
+      left.r - right.r,
+      left.g - right.g,
+      left.b - right.b,
+    );
 
   for (const pigment of ["red", "blue", "yellow"]) {
-    const withWhite = additions.map((white) =>
-      relativeLuminance(
-        mixPaintProportions({ [pigment]: 1, white }).rgb,
-      ),
-    );
     const withBlack = additions.map((black) =>
       relativeLuminance(
         mixPaintProportions({ [pigment]: 1, black }).rgb,
@@ -312,32 +354,128 @@ test("黒・白を増やした時の表示輝度は逆転しない", () => {
 
     for (let index = 1; index < additions.length; index += 1) {
       assert.ok(
+        withBlack[index] <= withBlack[index - 1] + 1e-12,
+        `${pigment}+black: ${withBlack.join(" -> ")}`,
+      );
+    }
+
+    const withWhite = additions.map((white) =>
+      relativeLuminance(
+        mixPaintProportions({ [pigment]: 1, white }).rgb,
+      ),
+    );
+    for (let index = 1; index < additions.length; index += 1) {
+      assert.ok(
         withWhite[index] + 1e-12 >= withWhite[index - 1],
         `${pigment}+white: ${withWhite.join(" -> ")}`,
       );
+    }
+
+    const pure = mixPaintProportions({ [pigment]: 1 }).rgb;
+    const strongTint = mixPaintProportions({
+      [pigment]: 1,
+      white: 64,
+    }).rgb;
+    assert.ok(
+      distance(strongTint, displayWhite) < distance(pure, displayWhite),
+      `${pigment}: ${JSON.stringify(pure)} -> ${JSON.stringify(strongTint)}`,
+    );
+  }
+});
+
+test("二定数物理モデルでは白を増やすとD65測色輝度が上がる", () => {
+  const additions = [0, 0.01, 0.05, 0.1, 0.2, 0.5, 1, 2, 4];
+  for (const pigment of ["red", "blue", "yellow", "black"]) {
+    const luminances = additions.map((white) =>
+      mixPaintReflectanceProportions({ [pigment]: 1, white }).reduce(
+        (total, reflectance, index) =>
+          total +
+          reflectance *
+            CIE_STANDARD_ILLUMINANT_D65[index] *
+            CIE_1931_2_DEGREE_Y[index],
+        0,
+      ),
+    );
+    for (let step = 1; step < luminances.length; step += 1) {
       assert.ok(
-        withBlack[index] <= withBlack[index - 1] + 1e-12,
-        `${pigment}+black: ${withBlack.join(" -> ")}`,
+        luminances[step] + 1e-12 >= luminances[step - 1],
+        `${pigment}+white at ${additions[step]}`,
       );
     }
   }
 });
 
-test("物理K/Sでは白を増やすと全波長の反射率が上がる", () => {
-  const additions = [0, 0.01, 0.05, 0.1, 0.2, 0.5, 1, 2, 4];
-  for (const pigment of ["red", "blue", "yellow", "black"]) {
-    const spectra = additions.map((white) =>
-      mixPaintReflectanceProportions({ [pigment]: 1, white }),
-    );
-    for (let step = 1; step < spectra.length; step += 1) {
+test("白ティントは8bit量子化の境界でも見える明度逆転を起こさない", () => {
+  const additions = Array.from({ length: 4001 }, (_, index) => index / 1000);
+  const bases = [
+    ["red", { red: 1 }],
+    ["blue", { blue: 1 }],
+    ["yellow", { yellow: 1 }],
+    ["black", { black: 1 }],
+    ["red2-blue3", { red: 2, blue: 3 }],
+    ["three-primary", { red: 1, blue: 1, yellow: 1 }],
+    [
+      "yellow-dominant-trace",
+      {
+        red: 0.008112333750343474,
+        blue: 0.02214702611413244,
+        yellow: 36.485670595610806,
+        black: 0.0012374209669841199,
+      },
+    ],
+  ];
+  for (const [label, base] of bases) {
+    let previous = -1;
+    for (const white of additions) {
+      const colour = mixPaintProportions({ ...base, white });
+      const luminance = relativeLuminance(colour.rgb);
       assert.ok(
-        spectra[step].every(
-          (sample, index) => sample + 1e-14 >= spectra[step - 1][index],
-        ),
-        `${pigment}+white at ${additions[step]}`,
+        luminance + 0.001 >= previous,
+        `${label}+white ${white.toFixed(3)}: ${colour.hex} / ${luminance} < ${previous}`,
       );
+      previous = luminance;
     }
   }
+
+  const before = mixPaintProportions({ yellow: 1, white: 0.327 });
+  const after = mixPaintProportions({ yellow: 1, white: 0.328 });
+  assert.ok(relativeLuminance(after.rgb) >= relativeLuminance(before.rgb));
+
+  const extremeBase = {
+    red: 0.00039143808794600977,
+    blue: 0.0002535416252170984,
+    yellow: 9987.325721563262,
+    black: 12.343029002069121,
+  };
+  const extremeTotal = Object.values(extremeBase).reduce(
+    (total, value) => total + value,
+    0,
+  );
+  const extremeBefore = relativeLuminance(
+    mixPaintProportions({
+      ...extremeBase,
+      white: 0.605 * extremeTotal,
+    }).rgb,
+  );
+  const extremeAfter = relativeLuminance(
+    mixPaintProportions({
+      ...extremeBase,
+      white: 0.61 * extremeTotal,
+    }).rgb,
+  );
+  assert.ok(extremeAfter + 0.001 >= extremeBefore);
+});
+
+test("白が無限小へ近づく時も白なしの分光表示へ連続する", () => {
+  const base = mixPaintProportions({ yellow: 1, blue: 0.0001 });
+  const traceWhite = mixPaintProportions({
+    yellow: 1,
+    blue: 0.0001,
+    white: 1e-14,
+  });
+
+  assert.deepEqual(traceWhite.rgb, base.rgb);
+  assert.equal(traceWhite.hex, base.hex);
 });
 
 test("キャッシュ済みRGBでも局所の実量と水分量で透明度を再計算する", () => {
