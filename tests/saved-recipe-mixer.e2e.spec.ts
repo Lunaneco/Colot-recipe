@@ -230,7 +230,7 @@ test("保存色を混色パレットへ置くたびに元レシピの配合を�
     "赤 57.1%：青 28.6%：黄 14.3%",
   );
   await expect(page.locator(".recipe-row--water .ratio-value")).toHaveText(
-    "36.4%",
+    "22.1%",
   );
 });
 
@@ -398,7 +398,7 @@ test("保存レシピを使った色を再保存・再読込しても局所配�
     "赤 50.0%：青 25.0%：黄 25.0%",
   );
   await expect(page.locator(".recipe-row--water .ratio-value")).toHaveText(
-    "33.3%",
+    "19.9%",
   );
 });
 

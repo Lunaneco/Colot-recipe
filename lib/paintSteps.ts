@@ -7,7 +7,7 @@ import {
 } from "./types";
 
 export function paintStepDeposit(step: PaintStep): number {
-  return step.deposit ?? 1;
+  return step.amount ?? step.deposit ?? 1;
 }
 
 export function paintStepUnits(step: PaintStep, material: MaterialId): number {

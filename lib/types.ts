@@ -3,36 +3,40 @@
  *
  * Keep the object order intentional: it is also the order used by recipes,
  * import/export and material pickers. Adding a pigment here makes the type
- * system require its optical data in colorScience.ts.
+ * system require its formulation in paintCalibration.ts.
+ *
+ * `color` is the spectral masstone of the pure paint as rendered by
+ * `mixPaint({ [id]: 1 })`; a unit test keeps the two in sync so the swatch a
+ * user taps is exactly the paint that lands on the palette.
  */
 export const MATERIAL_REGISTRY = {
   red: {
     label: "赤",
-    color: "#E60012",
+    color: "#BD0015",
     shortcut: "R",
     role: "pigment",
   },
   blue: {
     label: "青",
-    color: "#00A1E9",
+    color: "#00547F",
     shortcut: "B",
     role: "pigment",
   },
   yellow: {
     label: "黄",
-    color: "#FFF100",
+    color: "#FED200",
     shortcut: "Y",
     role: "pigment",
   },
   black: {
     label: "黒",
-    color: "#000000",
+    color: "#1D1E20",
     shortcut: "K",
     role: "pigment",
   },
   white: {
     label: "白",
-    color: "#f8f3e8",
+    color: "#faf2e5",
     shortcut: "W",
     role: "pigment",
   },
@@ -45,8 +49,6 @@ export const MATERIAL_REGISTRY = {
 } as const;
 
 export type MaterialId = keyof typeof MATERIAL_REGISTRY;
-export type MaterialRole =
-  (typeof MATERIAL_REGISTRY)[MaterialId]["role"];
 export type PigmentId = {
   [Id in MaterialId]: (typeof MATERIAL_REGISTRY)[Id]["role"] extends "pigment"
     ? Id
@@ -95,16 +97,27 @@ export type PaintStep = {
   x: number;
   y: number;
   createdAt: string;
+  /** Continuous deposited amount; omitted legacy dabs contribute one unit. */
+  amount?: number;
 };
 
 export type MixGesture = {
   id: string;
   kind?: "gesture" | "all";
-  /** Material amounts captured when the gesture was made. */
+  /**
+   * Material amounts captured when the gesture was made. "Mix all" folds
+   * these into the palette centre; manual strokes ignore them and instead
+   * drag whatever paint the brush actually passes over along `path`.
+   */
   recipe?: RecipeUnits;
+  /** Dabs present when this operation occurred, including same-ms ordering. */
+  stepIds?: string[];
+  /** Path length in canvas pixels. */
   distance: number;
+  /** Average pointer speed in canvas pixels per millisecond. */
   speed: number;
   points: number;
+  /** Normalised (0–1) pointer positions of a manual stroke, in order. */
   path?: Array<{ x: number; y: number }>;
   createdAt: string;
 };
@@ -121,6 +134,23 @@ export type MixedColorSnapshot = {
   spread: number;
   dryingSpeed: number;
   name: string;
+  /** Absolute local material amounts and effective finite-film thickness. */
+  exactPaint?: ExactPaint;
+};
+
+export interface OpticalPaintLayer {
+  pigment: number[];
+  mass: number;
+  opacity?: number;
+  lighting?: number;
+  /** Compose all children first, then apply this group's opacity once. */
+  children?: OpticalPaintLayer[];
+}
+
+export type ExactPaint = {
+  weights: RecipeUnits;
+  opticalMass: number;
+  opticalStack?: OpticalPaintLayer[];
 };
 
 export type CapturedColorAppearance = {
@@ -136,6 +166,8 @@ export type SavedColor = {
   mixed: MixedColorSnapshot;
   /** Exact rendered RGBA captured by the mixing-palette eyedropper. */
   capturedAppearance?: CapturedColorAppearance;
+  /** Physical sample independent of the compact, integer recipe summary. */
+  exactPaint?: ExactPaint;
   steps: PaintStep[];
   mixGestures: MixGesture[];
   mixMethod: string;
@@ -175,7 +207,18 @@ export type DrawingLayer = {
   name: string;
   visible: boolean;
   opacity: number;
+  /** Rendered RGBA appearance (thumbnail/export compatible). */
   dataUrl?: string;
+  /**
+   * Pigment field encoded by `encodePigmentField`: [red/blue/yellow,
+   * black/white/mass, body], plus an optional fourth wetness plane and fifth lossless glaze payload.
+   * Two-image files predate the body plane. Missing
+   * on legacy artworks, which are rebuilt from `dataUrl` through the pigment
+   * inverse.
+   */
+  pigmentDataUrls?: string[];
+  /** Epoch time of the pigment snapshot, used to resume physical drying. */
+  pigmentSavedAt?: number;
 };
 
 export const EMPTY_RECIPE = Object.fromEntries(
@@ -191,8 +234,5 @@ export const MATERIAL_LABELS = Object.fromEntries(
 ) as Record<MaterialId, string>;
 
 export const MATERIAL_COLORS = Object.fromEntries(
-  MATERIAL_IDS.map((material) => [
-    material,
-    MATERIAL_REGISTRY[material].color,
-  ]),
+  MATERIAL_IDS.map((material) => [material, MATERIAL_REGISTRY[material].color]),
 ) as Record<MaterialId, string>;

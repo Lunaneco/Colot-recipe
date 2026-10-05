@@ -7,58 +7,45 @@ import {
   EMPTY_RECIPE,
   MATERIAL_IDS,
   PIGMENT_IDS,
+  type ExactPaint,
   type MaterialId,
   type MixGesture,
   type PaintSize,
   type PaintStep,
+  type OpticalPaintLayer,
   type PigmentId,
   type RecipeUnits,
 } from "./types";
-import { paintStepDeposit, paintStepUnits } from "./paintSteps";
+
+import { paintStepUnits, paintStepDeposit } from "./paintSteps";
 
 export type SpatialMixState = {
   recipe: RecipeUnits;
   steps: PaintStep[];
   mixGestures: MixGesture[];
+  /** A re-expanded measured stack, retained until the paint is manipulated. */
+  reopenedPaint?: ExactPaint;
 };
-
-export type SpatialSampleViewport = {
-  width: number;
-  height: number;
-};
-
+export type SpatialSampleViewport = { width: number; height: number };
 export type SpatialPaintSample = {
   point: { x: number; y: number };
-  /**
-   * Local material contribution before normalisation. A dab contributes one
-   * unit at its centre and fades smoothly toward its irregular edge.
-   */
+  /** Continuous local material amounts, including water. */
   weights: Record<MaterialId, number>;
-  /** Compact integer proxy for display/saving; exact colour uses `weights`. */
+  /** Compact integer summary only; `exactPaint` is authoritative for reuse. */
   recipe: RecipeUnits;
   pigmentRatio: Record<PigmentId, number>;
   waterRatio: number;
   coverage: number;
   mixed: MixedPaintColor;
-  /** Alpha read from the rendered palette when sampled by the eyedropper. */
+  exactPaint: ExactPaint;
   renderedAlpha?: number;
+  opticalStack?: OpticalPaintLayer[];
+  opticalStackScale?: number;
 };
-
-const SIZE_RADIUS: Record<PaintSize, number> = {
-  small: 48,
-  medium: 76,
-  large: 108,
-};
-
-const DEFAULT_VIEWPORT: SpatialSampleViewport = {
-  width: 1100,
-  height: 760,
-};
+const SIZE_RADIUS: Record<PaintSize, number> = { small: 48, medium: 76, large: 108 };
+const DEFAULT_VIEWPORT = { width: 1100, height: 760 };
 const PROXY_PIGMENT_UNITS = 32;
-const SPATIAL_INDEX_COLUMNS = 16;
 const COLOUR_RATIO_SUBDIVISIONS = 64;
-// Keep a sampled recipe within the persistence schema's per-material limit
-// while retaining ratios as small as one part in 500 (for example 998:2).
 const MAX_LOCAL_RECIPE_UNITS = 1_000;
 // Stop at the smallest integer recipe whose summed material-share error is at
 // most 0.2 percentage points. This keeps ordinary sampled recipes reusable
@@ -70,22 +57,18 @@ const MAX_LOCAL_RECIPE_TOTAL_SHARE_ERROR = 0.002;
 const TRACE_PIGMENT_SHARE = 1 / 500;
 const MAX_TRACE_PIGMENT_RELATIVE_ERROR = 0.001;
 
+
+export const MAX_WATER_SPREAD = 1.32;
+const GRID_SPACING = 4;
+const MATERIAL_COUNT = MATERIAL_IDS.length;
+const EMPTY_MIXED = mixPaintProportions(EMPTY_RECIPE);
 const clamp = (value: number, minimum = 0, maximum = 1) =>
   Math.min(maximum, Math.max(minimum, value));
-
-function normaliseViewport(
-  viewport: SpatialSampleViewport | undefined,
-): SpatialSampleViewport {
-  return {
-    width: Math.max(1, viewport?.width ?? DEFAULT_VIEWPORT.width),
-    height: Math.max(1, viewport?.height ?? DEFAULT_VIEWPORT.height),
-  };
-}
-
-function emptyWeights(): Record<MaterialId, number> {
-  return { ...EMPTY_RECIPE };
-}
-
+const emptyWeights = (): RecipeUnits => ({ ...EMPTY_RECIPE });
+const normaliseViewport = (viewport?: SpatialSampleViewport) => ({
+  width: Math.max(1, viewport?.width ?? DEFAULT_VIEWPORT.width),
+  height: Math.max(1, viewport?.height ?? DEFAULT_VIEWPORT.height),
+});
 function dabRadii(
   step: PaintStep,
   viewport: SpatialSampleViewport,
@@ -141,7 +124,7 @@ function paintWaveScale(step: PaintStep, angle: number) {
   );
 }
 
-function dabSupportRadii(
+export function paintDabSupportRadii(
   step: PaintStep,
   viewport: SpatialSampleViewport,
   radiusScale = 1,
@@ -182,140 +165,193 @@ export function paintDabContribution(
     role === "pigment" && radiusScale > 1
       ? radiusScale ** 2 * (dryExponent + 1) - 1
       : dryExponent;
-  return (1 - squaredDistance) ** kernelExponent;
+  // A recipe unit is total material, independent of dab width, hold spread,
+  // or the wider water footprint. Normalise the analytic kernel integral to
+  // the medium circular dab (π * 76² / 2.55). Water expansion changes the
+  // exponent above, so its radiusScale is already accounted for there.
+  const baseRadii = dabRadii(step, viewport, 1, role);
+  const waveAmplitude = role === "pigment" ? paintWaveAmplitude(step) : 0;
+  const waveArea = 1 + waveAmplitude ** 2 * (0.68 ** 2 + 0.32 ** 2) / 2;
+  const radiusRatio = SIZE_RADIUS.medium / (baseRadii.x * viewport.width);
+  const normalisation = radiusRatio ** 2 / waveArea;
+  return normalisation * (1 - squaredDistance) ** kernelExponent;
 }
 
-function distanceToSegment(
-  x: number,
-  y: number,
-  start: { x: number; y: number },
-  end: { x: number; y: number },
-  viewport: SpatialSampleViewport,
-) {
-  const pointX = x * viewport.width;
-  const pointY = y * viewport.height;
-  const startX = start.x * viewport.width;
-  const startY = start.y * viewport.height;
-  const segmentX = (end.x - start.x) * viewport.width;
-  const segmentY = (end.y - start.y) * viewport.height;
-  const lengthSquared = segmentX * segmentX + segmentY * segmentY;
-  if (lengthSquared === 0) {
-    return Math.hypot(pointX - startX, pointY - startY);
+function supportRadii(step: PaintStep, viewport: SpatialSampleViewport, scale = 1) {
+  const p = paintDabSupportRadii(step, viewport, scale);
+  const w = paintStepUnits(step, "water") > 0 ? paintDabSupportRadii(step, viewport, 1, "water") : {x: 0, y: 0};
+  return { x: Math.max(p.x, w.x), y: Math.max(p.y, w.y) };
+}
+function baseWeightsAt(steps: readonly PaintStep[], x: number, y: number,
+  viewport: SpatialSampleViewport, weights: RecipeUnits, spreads: Map<PaintStep, number>) {
+  for (const step of steps) for (const material of MATERIAL_IDS) {
+    const units = paintStepUnits(step, material);
+    if (units > 0) weights[material] += units * paintDabContribution(step, x, y, viewport, material === "water" ? 1 : spreads.get(step) ?? 1, material === "water" ? "water" : "pigment");
   }
-  const amount = clamp(
-    ((pointX - startX) * segmentX + (pointY - startY) * segmentY) /
-      lengthSquared,
-  );
-  return Math.hypot(
-    pointX - (startX + segmentX * amount),
-    pointY - (startY + segmentY * amount),
-  );
+  return weights;
 }
 
-function gestureInfluence(
-  gesture: MixGesture,
-  x: number,
-  y: number,
-  viewport: SpatialSampleViewport,
-) {
-  if (gesture.kind === "all") {
-    const dx = (x - 0.5) / (235 / viewport.width);
-    const dy = (y - 0.51) / (137 / viewport.height);
-    const distance = dx * dx + dy * dy;
-    return distance >= 1 ? 0 : (1 - distance) ** 1.35 * 3.2;
-  }
-
-  const path = gesture.path ?? [];
-  if (path.length < 2) return 0;
-  let nearest = Number.POSITIVE_INFINITY;
-  for (let index = 1; index < path.length; index += 1) {
-    nearest = Math.min(
-      nearest,
-      distanceToSegment(
-        x,
-        y,
-        path[index - 1],
-        path[index],
-        viewport,
-      ),
-    );
-  }
-  const width =
-    clamp(0.035 + gesture.speed * 0.018, 0.035, 0.09) *
-    DEFAULT_VIEWPORT.width;
-  if (nearest >= width) return 0;
-  return (1 - nearest / width) ** 1.5 * 0.9;
+function waterSpreads(steps: readonly PaintStep[], viewport: SpatialSampleViewport) {
+  return new Map(steps.map(step => {
+    let water = 0;
+    for (const source of steps) water += paintStepUnits(source, "water") * paintDabContribution(source, step.x, step.y, viewport, 1, "water");
+    return [step, 1 + (MAX_WATER_SPREAD - 1) * (1 - Math.exp(-water * 1.6))];
+  }));
 }
 
-function proxyRecipeFromWeights(
-  weights: Record<MaterialId, number>,
-): RecipeUnits {
-  const pigmentWeight = PIGMENT_IDS.reduce(
-    (total, pigment) => total + weights[pigment],
-    0,
-  );
-  if (pigmentWeight <= 0) {
-    return {
-      ...EMPTY_RECIPE,
-      water: weights.water > 0 ? 1 : 0,
-    };
-  }
-
-  const recipe = {
-    ...EMPTY_RECIPE,
-    water: Math.min(
-      96,
-      Math.max(
-        0,
-        Math.round((weights.water / pigmentWeight) * PROXY_PIGMENT_UNITS),
-      ),
-    ),
-  } satisfies RecipeUnits;
-
-  for (const pigment of PIGMENT_IDS) {
-    recipe[pigment] =
-      weights[pigment] <= 0
-        ? 0
-        : Math.max(
-            1,
-            Math.round(
-              (weights[pigment] / pigmentWeight) * PROXY_PIGMENT_UNITS,
-            ),
-          );
-  }
-  return recipe;
+/** Cartesian cells represent material mass, rather than path coordinates.
+ * Revisited cells therefore take part in every exchange: loops and reversals
+ * cannot duplicate their pigment. Each transfer conserves every material. */
+type MaterialGrid = {
+  columns: number; rows: number; dx: number; dy: number; area: number;
+  amounts: Float64Array;
+};
+type PreparedPalette = { grid?: MaterialGrid; laterSteps: PaintStep[] };
+const preparedCache = new WeakMap<SpatialMixState, Map<string, PreparedPalette>>();
+function makeGrid(viewport: SpatialSampleViewport): MaterialGrid {
+  const columns = Math.ceil(viewport.width / GRID_SPACING);
+  const rows = Math.ceil(viewport.height / GRID_SPACING);
+  const dx = viewport.width / columns, dy = viewport.height / rows;
+  return { columns, rows, dx, dy, area: dx * dy,
+    amounts: new Float64Array(columns * rows * MATERIAL_COUNT) };
 }
-
-/**
- * Quantised colour proxy used only when a caller supplies a render cache.
- * Direct samples must send their continuous weights to the colour engine.
- */
-function colourRecipeFromWeights(
-  weights: Record<MaterialId, number>,
-): Required<RecipeUnits> {
-  const pigmentWeight = PIGMENT_IDS.reduce(
-    (total, pigment) => total + weights[pigment],
-    0,
-  );
-  if (pigmentWeight <= 0) {
-    return {
-      ...EMPTY_RECIPE,
-      water: weights.water > 0 ? 1 : 0,
-    };
+function addDab(grid: MaterialGrid, step: PaintStep, viewport: SpatialSampleViewport, scale = 1) {
+  const radii = supportRadii(step, viewport, scale);
+  const x0 = Math.max(0, Math.floor((step.x - radii.x) * grid.columns));
+  const x1 = Math.min(grid.columns - 1, Math.ceil((step.x + radii.x) * grid.columns));
+  const y0 = Math.max(0, Math.floor((step.y - radii.y) * grid.rows));
+  const y1 = Math.min(grid.rows - 1, Math.ceil((step.y + radii.y) * grid.rows));
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) for (let p = 0; p < MATERIAL_COUNT; p++) {
+    const material = MATERIAL_IDS[p], units = paintStepUnits(step, material);
+    if (units > 0) grid.amounts[(y * grid.columns + x) * MATERIAL_COUNT + p] += units * paintDabContribution(step, (x+.5)/grid.columns, (y+.5)/grid.rows, viewport, material === "water" ? 1 : scale, material === "water" ? "water" : "pigment");
   }
-
-  const scale = PROXY_PIGMENT_UNITS / pigmentWeight;
-  const quantize = (value: number) =>
-    Math.round(value * COLOUR_RATIO_SUBDIVISIONS) /
-    COLOUR_RATIO_SUBDIVISIONS;
-  return Object.fromEntries(
-    MATERIAL_IDS.map((material) => [
-      material,
-      quantize(weights[material] * scale),
-    ]),
-  ) as Required<RecipeUnits>;
 }
-
+function brushPath(gesture: MixGesture, viewport: SpatialSampleViewport, spacing: number) {
+  const input = gesture.path ?? [];
+  if (input.length < 2) return [];
+  const vertices = input.map(p => ({ x: clamp(p.x) * viewport.width, y: clamp(p.y) * viewport.height }));
+  const arcs = [0];
+  for (let i = 1; i < vertices.length; i += 1) arcs.push(arcs[i - 1] +
+    Math.hypot(vertices[i].x - vertices[i - 1].x, vertices[i].y - vertices[i - 1].y));
+  const length = arcs[arcs.length - 1];
+  if (length <= 0) return [vertices[0]];
+  const count = Math.min(4096, Math.max(1, Math.ceil(length / spacing)));
+  const result: Array<{ x: number; y: number }> = [];
+  let segment = 1;
+  for (let i = 0; i <= count; i += 1) {
+    const arc = length * i / count;
+    while (segment < vertices.length - 1 && arcs[segment] < arc) segment += 1;
+    const span = arcs[segment] - arcs[segment - 1];
+    const t = span > 0 ? (arc - arcs[segment - 1]) / span : 0;
+    result.push({ x: vertices[segment - 1].x + (vertices[segment].x - vertices[segment - 1].x) * t,
+      y: vertices[segment - 1].y + (vertices[segment].y - vertices[segment - 1].y) * t });
+  }
+  return result;
+}
+function footprint(grid: MaterialGrid, point: { x: number; y: number }, radius: number, exchange: number) {
+  const cells: Array<{ offset: number; exchange: number }> = [];
+  let area = 0;
+  const x0 = Math.max(0, Math.floor((point.x - radius) / grid.dx));
+  const x1 = Math.min(grid.columns - 1, Math.ceil((point.x + radius) / grid.dx));
+  const y0 = Math.max(0, Math.floor((point.y - radius) / grid.dy));
+  const y1 = Math.min(grid.rows - 1, Math.ceil((point.y + radius) / grid.dy));
+  for (let y = y0; y <= y1; y += 1) for (let x = x0; x <= x1; x += 1) {
+    const squared = (((x + .5) * grid.dx - point.x) / radius) ** 2 +
+      (((y + .5) * grid.dy - point.y) / radius) ** 2;
+    if (squared >= 1) continue;
+    const e = exchange * (1 - squared) ** 1.5;
+    cells.push({ offset: (y * grid.columns + x) * MATERIAL_COUNT, exchange: e });
+    area += e * grid.area;
+  }
+  return { cells, area };
+}
+function dragPaint(grid: MaterialGrid, gesture: MixGesture, viewport: SpatialSampleViewport) {
+  const radius = clamp(.035 + gesture.speed * .018, .035, .09) * DEFAULT_VIEWPORT.width;
+  const points = brushPath(gesture, viewport, radius / 6);
+  if (!points.length) return;
+  const strength = clamp(.92 - gesture.speed * .2, .5, .92);
+  const exchange = 1 - (1 - strength) ** (1 / 12);
+  const carried = new Float64Array(MATERIAL_COUNT);
+  const lifted = new Float64Array(MATERIAL_COUNT);
+  for (let i = 0; i < points.length; i += 1) {
+    const mask = footprint(grid, points[i], radius, exchange);
+    if (mask.area <= 0) continue;
+    const distance = i > 0 ? Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y) : radius / 6;
+    const release = 1 - Math.exp(-distance / (radius * 1.5));
+    lifted.fill(0);
+    for (const cell of mask.cells) for (let p = 0; p < MATERIAL_COUNT; p += 1) {
+      const before = grid.amounts[cell.offset + p];
+      lifted[p] += before * cell.exchange * grid.area;
+      grid.amounts[cell.offset + p] = before * (1 - cell.exchange) +
+        carried[p] * release * cell.exchange / mask.area;
+    }
+    for (let p = 0; p < MATERIAL_COUNT; p += 1) carried[p] = carried[p] * (1 - release) + lifted[p];
+  }
+  const mask = footprint(grid, points[points.length - 1], radius, exchange);
+  if (mask.area > 0) for (const cell of mask.cells) for (let p = 0; p < MATERIAL_COUNT; p += 1) {
+    grid.amounts[cell.offset + p] += carried[p] * cell.exchange / mask.area;
+  }
+}
+function mixAll(grid: MaterialGrid, viewport: SpatialSampleViewport) {
+  const total = new Float64Array(MATERIAL_COUNT);
+  const shape = new Float64Array(grid.columns * grid.rows);
+  let norm = 0;
+  for (let y = 0; y < grid.rows; y += 1) for (let x = 0; x < grid.columns; x += 1) {
+    const index = y * grid.columns + x;
+    for (let p = 0; p < MATERIAL_COUNT; p += 1) total[p] += grid.amounts[index * MATERIAL_COUNT + p] * grid.area;
+    const d = (((x + .5) * grid.dx - viewport.width * .5) / 235) ** 2 +
+      (((y + .5) * grid.dy - viewport.height * .51) / 137) ** 2;
+    shape[index] = d >= 1 ? 0 : (1 - d) ** 1.35;
+    norm += shape[index] * grid.area;
+  }
+  if (norm <= 0) return;
+  for (let index = 0; index < shape.length; index += 1) for (let p = 0; p < MATERIAL_COUNT; p += 1)
+    grid.amounts[index * MATERIAL_COUNT + p] = total[p] * shape[index] / norm;
+}
+function preparePalette(state: SpatialMixState, viewport: SpatialSampleViewport): PreparedPalette {
+  if (!state.mixGestures.length) return { laterSteps: state.steps };
+  const key = `${viewport.width}:${viewport.height}`;
+  let versions = preparedCache.get(state);
+  if (!versions) { versions = new Map(); preparedCache.set(state, versions); }
+  const found = versions.get(key);
+  if (found) return found;
+  const grid = makeGrid(viewport);
+  const consumed = new Set<string>();
+  for (const gesture of state.mixGestures) {
+    if (gesture.kind !== "all" && (gesture.path?.length ?? 0) < 2) continue;
+    const ids = gesture.stepIds ? new Set(gesture.stepIds) : undefined;
+    const participating = state.steps.filter(step => ids ? ids.has(step.id) : step.createdAt <= gesture.createdAt);
+    const spreads = waterSpreads(participating, viewport);
+    const legacyCounts = emptyWeights();
+    for (const step of state.steps) {
+      for (const material of MATERIAL_IDS) legacyCounts[material] += paintStepUnits(step, material);
+      if (consumed.has(step.id)) continue;
+      if (ids ? !ids.has(step.id) : step.createdAt > gesture.createdAt) continue;
+      // Legacy snapshots predate IDs; recipe counts resolve same-ms additions.
+      if (!ids && gesture.recipe && legacyCounts[step.material] > (gesture.recipe[step.material] ?? 0)) continue;
+      addDab(grid, step, viewport, spreads.get(step));
+      consumed.add(step.id);
+    }
+    if (gesture.kind === "all") mixAll(grid, viewport);
+    else dragPaint(grid, gesture, viewport);
+  }
+  const result = { grid, laterSteps: state.steps.filter(s => !consumed.has(s.id)) };
+  if (versions.size >= 2) versions.clear();
+  versions.set(key, result);
+  return result;
+}
+function sampleGrid(grid: MaterialGrid, x: number, y: number, weights: RecipeUnits) {
+  const gx = x * grid.columns - .5, gy = y * grid.rows - .5;
+  const x0 = Math.floor(gx), y0 = Math.floor(gy), tx = gx - x0, ty = gy - y0;
+  for (let dy = 0; dy <= 1; dy += 1) for (let dx = 0; dx <= 1; dx += 1) {
+    const px = x0 + dx, py = y0 + dy;
+    if (px < 0 || py < 0 || px >= grid.columns || py >= grid.rows) continue;
+    const share = (dx ? tx : 1 - tx) * (dy ? ty : 1 - ty);
+    const offset = (py * grid.columns + px) * MATERIAL_COUNT;
+    for (let p = 0; p < MATERIAL_COUNT; p += 1) weights[MATERIAL_IDS[p]] += grid.amounts[offset + p] * share;
+  }
+  return weights;
+}
 function compactRecipeFromWeights(
   weights: Record<MaterialId, number>,
 ): RecipeUnits {
@@ -443,242 +479,98 @@ function compactRecipeFromWeights(
   };
 }
 
-/**
- * Samples the locally overlapping paint at a normalised palette coordinate.
- * The returned ratio is spatial: moving through an overlap changes the recipe
- * continuously, while every original dab still represents exactly one unit.
- * Without a colour cache, the spectral engine receives those continuous
- * weights unchanged. Supplying a cache explicitly opts rendering into a
- * bounded ratio quantisation so neighbouring pixels can reuse colours.
- */
-export function sampleSpatialPaint(
-  state: SpatialMixState,
-  x: number,
-  y: number,
-  colourCache?: Map<string, MixedPaintColor>,
-  requestedViewport?: SpatialSampleViewport,
-): SpatialPaintSample {
-  const sample = sampleSpatialPaintFromSteps(
-    state,
-    state.steps,
-    x,
-    y,
-    colourCache,
-    normaliseViewport(requestedViewport),
-  );
-  return {
-    ...sample,
-    recipe: compactRecipeFromWeights(sample.weights),
-  };
+/** Exact local material and finite-film state retained independently of UI units. */
+export function exactPaintFromWeights(weights: RecipeUnits): ExactPaint {
+  const mass = PIGMENT_IDS.reduce((sum, p) => sum + weights[p], 0);
+  const concentration = mass / Math.max(1e-12, mass + weights.water * 1.45);
+  return { weights: { ...weights }, opticalMass: mass * concentration ** .8 };
 }
-
-function sampleSpatialPaintFromSteps(
-  state: SpatialMixState,
-  steps: PaintStep[],
-  x: number,
-  y: number,
-  colourCache: Map<string, MixedPaintColor> | undefined,
-  viewport: SpatialSampleViewport,
-): SpatialPaintSample {
-  const point = { x: clamp(x), y: clamp(y) };
-  const weights = emptyWeights();
-
-  // First measure local water. It can carry nearby pigment slightly beyond
-  // the edge of a dry dab, but it never changes a distant, unrelated area.
-  for (const step of steps) {
-    const waterUnits = paintStepUnits(step, "water");
-    if (waterUnits <= 0) continue;
-    weights.water += waterUnits * paintDabContribution(
-      step,
-      point.x,
-      point.y,
-      viewport,
-      1,
-      "water",
-    );
-  }
-
-  for (const gesture of state.mixGestures) {
-    const influence = gestureInfluence(
-      gesture,
-      point.x,
-      point.y,
-      viewport,
-    );
-    if (influence <= 0) continue;
-    const gestureRecipe = gesture.recipe ?? state.recipe;
-    if (gesture.kind === "all" && gestureRecipe.water > 0) {
-      weights.water += gestureRecipe.water * influence;
-    }
-  }
-
-  const wetness = 1 - Math.exp(-weights.water * 1.6);
-  const wetSpread = 1 + wetness * 0.32;
-
-  for (const step of steps) {
-    const hasPigment = PIGMENT_IDS.some(
-      (pigment) => paintStepUnits(step, pigment) > 0,
-    );
-    if (!hasPigment) continue;
-    const contribution = paintDabContribution(
-      step,
-      point.x,
-      point.y,
-      viewport,
-      wetSpread,
-      "pigment",
-    );
-    for (const pigment of PIGMENT_IDS) {
-      weights[pigment] += paintStepUnits(step, pigment) * contribution;
-    }
-  }
-
-  // A mixing stroke uses the material amounts captured when the gesture was
-  // made. Manual strokes do not pull remote water through unrelated regions;
-  // "mix all" deliberately includes water present at that moment.
-  for (const gesture of state.mixGestures) {
-    const influence = gestureInfluence(
-      gesture,
-      point.x,
-      point.y,
-      viewport,
-    );
-    if (influence <= 0) continue;
-    const gestureRecipe = gesture.recipe ?? state.recipe;
-    for (const pigment of PIGMENT_IDS) {
-      const total = gestureRecipe[pigment];
-      if (total > 0) weights[pigment] += total * influence;
-    }
-  }
-
-  const pigmentWeight = PIGMENT_IDS.reduce(
-    (total, pigment) => total + weights[pigment],
-    0,
-  );
-  const totalWeight = pigmentWeight + weights.water;
-  const pigmentRatio = Object.fromEntries(
-    PIGMENT_IDS.map((pigment) => [
-      pigment,
-      pigmentWeight > 0 ? weights[pigment] / pigmentWeight : 0,
-    ]),
-  ) as Record<PigmentId, number>;
-  const waterRatio = totalWeight > 0 ? weights.water / totalWeight : 0;
-  const recipe = proxyRecipeFromWeights(weights);
-  const mixed = (() => {
-    if (!colourCache) {
-      return mixPaintProportions(weights);
-    }
-
-    // Dense field rendering deliberately trades sub-pixel ratio precision for
-    // cache reuse. Picker/direct sampling never enters this branch.
-    const colourRecipe = colourRecipeFromWeights(weights);
-    const cacheKey = PIGMENT_IDS.map(
-      (pigment) =>
-        Math.round(colourRecipe[pigment] * COLOUR_RATIO_SUBDIVISIONS),
-    ).join(":");
-    const cached = colourCache.get(cacheKey);
-    if (cached) {
-      return mixPaintProportionsFromRgb(weights, cached.rgb);
-    }
-
-    const calculated = mixPaintProportions(colourRecipe);
-    colourCache.set(cacheKey, calculated);
-    return mixPaintProportionsFromRgb(weights, calculated.rgb);
-  })();
-
-  return {
-    point,
-    weights,
-    recipe,
-    pigmentRatio,
-    waterRatio,
-    coverage: clamp(1 - Math.exp(-2.2 * pigmentWeight ** 0.82)),
-    mixed,
-  };
+/** Re-expand a measured local film without changing its pigment or water mass. */
+export function stepsFromExactPaint(paint: ExactPaint, createdAt: string): PaintStep[] {
+  return MATERIAL_IDS.filter((material) => paint.weights[material] > 0).map((material) => ({
+    id: `measured-${material}-${createdAt}`, material, size: "medium",
+    x: 0.5, y: 0.51, amount: paint.weights[material] * (material === "water" ? 1.42 ** 2 : 1), createdAt,
+  }));
 }
-
-/**
- * Builds a lightweight spatial index for dense field rendering. The returned
- * sampler is mathematically equivalent to `sampleSpatialPaint`, but checks
- * only dabs whose compact support can reach the requested cell.
- */
-export function createSpatialPaintSampler(
-  state: SpatialMixState,
-  requestedViewport?: SpatialSampleViewport,
-) {
+export function scaleOpticalStack(stack: readonly OpticalPaintLayer[], scale: number): OpticalPaintLayer[] {
+  return stack.map((layer) => ({ ...layer, pigment: [...layer.pigment], mass: layer.mass * scale,
+    ...(layer.children ? { children: scaleOpticalStack(layer.children, scale) } : {}) }));
+}
+function sampledPaint(weights: RecipeUnits, point: { x: number; y: number }, cache?: Map<string, MixedPaintColor>): SpatialPaintSample {
+  const pigmentWeight = PIGMENT_IDS.reduce((sum, p) => sum + weights[p], 0);
+  const total = pigmentWeight + weights.water;
+  const ratio = Object.fromEntries(PIGMENT_IDS.map(p => [p, pigmentWeight > 0 ? weights[p] / pigmentWeight : 0])) as Record<PigmentId, number>;
+  let mixed: MixedPaintColor;
+  if (pigmentWeight <= 0 && weights.water <= 0) mixed = EMPTY_MIXED;
+  else if (!cache || pigmentWeight <= 0) mixed = mixPaintProportions(weights);
+  else {
+    const scale = PROXY_PIGMENT_UNITS * COLOUR_RATIO_SUBDIVISIONS / pigmentWeight;
+    const values = PIGMENT_IDS.map(p => Math.round(weights[p] * scale));
+    const key = values.join(":");
+    let colour = cache.get(key);
+    if (!colour) {
+      colour = mixPaintProportions(Object.fromEntries(PIGMENT_IDS.map((p, i) => [p, values[i]])));
+      cache.set(key, colour);
+    }
+    mixed = mixPaintProportionsFromRgb(weights, colour.rgb);
+  }
+  return { point, weights, recipe: compactRecipeFromWeights(weights), pigmentRatio: ratio,
+    waterRatio: total > 0 ? weights.water / total : 0,
+    coverage: clamp(1 - Math.exp(-2.2 * pigmentWeight ** .82)), mixed,
+    exactPaint: exactPaintFromWeights(weights) };
+}
+/** Rendering reads material quantities without constructing recipe summaries. */
+export function createSpatialMaterialSampler(state: SpatialMixState, requestedViewport?: SpatialSampleViewport) {
   const viewport = normaliseViewport(requestedViewport);
-  const rows = Math.max(
-    8,
-    Math.round(
-      SPATIAL_INDEX_COLUMNS * (viewport.height / viewport.width),
-    ),
-  );
-  const bins = Array.from(
-    { length: SPATIAL_INDEX_COLUMNS * rows },
-    () => [] as PaintStep[],
-  );
-
-  for (const step of state.steps) {
-    // Pigment may spread into a neighbouring wet dab by up to 32%, so the
-    // spatial index must include that maximum reach.
-    const hasPigment = PIGMENT_IDS.some(
-      (pigment) => paintStepUnits(step, pigment) > 0,
-    );
-    const hasWater = paintStepUnits(step, "water") > 0;
-    const pigmentRadii = hasPigment
-      ? dabSupportRadii(step, viewport, 1.32, "pigment")
-      : { x: 0, y: 0 };
-    const waterRadii = hasWater
-      ? dabSupportRadii(step, viewport, 1, "water")
-      : { x: 0, y: 0 };
-    const radii = {
-      x: Math.max(pigmentRadii.x, waterRadii.x),
-      y: Math.max(pigmentRadii.y, waterRadii.y),
-    };
-    const firstColumn = Math.max(
-      0,
-      Math.floor((step.x - radii.x) * SPATIAL_INDEX_COLUMNS),
-    );
-    const lastColumn = Math.min(
-      SPATIAL_INDEX_COLUMNS - 1,
-      Math.floor((step.x + radii.x) * SPATIAL_INDEX_COLUMNS),
-    );
-    const firstRow = Math.max(0, Math.floor((step.y - radii.y) * rows));
-    const lastRow = Math.min(
-      rows - 1,
-      Math.floor((step.y + radii.y) * rows),
-    );
-
-    for (let row = firstRow; row <= lastRow; row += 1) {
-      for (
-        let column = firstColumn;
-        column <= lastColumn;
-        column += 1
-      ) {
-        bins[row * SPATIAL_INDEX_COLUMNS + column].push(step);
-      }
-    }
+  const prepared = preparePalette(state, viewport);
+  const spreads = waterSpreads(prepared.laterSteps, viewport);
+  const columns = 16, rows = Math.max(8, Math.round(columns * viewport.height / viewport.width));
+  const bins = Array.from({ length: columns * rows }, () => [] as PaintStep[]);
+  for (const step of prepared.laterSteps) {
+    const radii = supportRadii(step, viewport, spreads.get(step));
+    const x0 = Math.max(0, Math.floor((step.x - radii.x) * columns));
+    const x1 = Math.min(columns - 1, Math.floor((step.x + radii.x) * columns));
+    const y0 = Math.max(0, Math.floor((step.y - radii.y) * rows));
+    const y1 = Math.min(rows - 1, Math.floor((step.y + radii.y) * rows));
+    for (let y = y0; y <= y1; y += 1) for (let x = x0; x <= x1; x += 1) bins[y * columns + x].push(step);
   }
-
-  return (
-    x: number,
-    y: number,
-    colourCache?: Map<string, MixedPaintColor>,
-  ) => {
-    const pointX = clamp(x);
-    const pointY = clamp(y);
-    const column = Math.min(
-      SPATIAL_INDEX_COLUMNS - 1,
-      Math.floor(pointX * SPATIAL_INDEX_COLUMNS),
-    );
-    const row = Math.min(rows - 1, Math.floor(pointY * rows));
-    return sampleSpatialPaintFromSteps(
-      state,
-      bins[row * SPATIAL_INDEX_COLUMNS + column],
-      pointX,
-      pointY,
-      colourCache,
-      viewport,
-    );
+  return (x: number, y: number) => {
+    const point = { x: clamp(x), y: clamp(y) };
+    const weights = prepared.grid ? sampleGrid(prepared.grid, point.x, point.y, emptyWeights()) : emptyWeights();
+    const bx = Math.min(columns - 1, Math.floor(point.x * columns));
+    const by = Math.min(rows - 1, Math.floor(point.y * rows));
+    baseWeightsAt(bins[by * columns + bx], point.x, point.y, viewport, weights, spreads);
+    const pigmentWeight = PIGMENT_IDS.reduce((sum, p) => sum + weights[p], 0);
+    const total = pigmentWeight + weights.water;
+    const sample: Pick<SpatialPaintSample, "point" | "weights" | "waterRatio" | "coverage" | "opticalStack" | "opticalStackScale"> = {
+      point, weights, waterRatio: total > 0 ? weights.water / total : 0,
+      coverage: clamp(1 - Math.exp(-2.2 * pigmentWeight ** .82)),
+    };
+    if (state.reopenedPaint?.opticalStack && !state.mixGestures.length) {
+      const measured = state.reopenedPaint;
+      const originalMass = PIGMENT_IDS.reduce((sum, p) => sum + measured.weights[p], 0);
+      const currentMass = PIGMENT_IDS.reduce((sum, p) => sum + weights[p], 0);
+      sample.opticalStack = measured.opticalStack;
+      sample.opticalStackScale = originalMass > 0 ? currentMass / originalMass : 0;
+    }
+    return sample;
   };
+}
+/** A sampler replays operations once and derives the inspector at the selected point. */
+export function createSpatialPaintSampler(state: SpatialMixState, requestedViewport?: SpatialSampleViewport) {
+  const sampleMaterial = createSpatialMaterialSampler(state, requestedViewport);
+  return (x: number, y: number, cache?: Map<string, MixedPaintColor>) => {
+    const material = sampleMaterial(x, y);
+    const sample = sampledPaint(material.weights, material.point, cache);
+    if (material.opticalStack) {
+      sample.opticalStack = material.opticalStack;
+      sample.opticalStackScale = material.opticalStackScale;
+      sample.exactPaint.opticalMass = state.reopenedPaint!.opticalMass * material.opticalStackScale!;
+    }
+    return sample;
+  };
+}
+export function sampleSpatialPaint(state: SpatialMixState, x: number, y: number,
+  cache?: Map<string, MixedPaintColor>, viewport?: SpatialSampleViewport) {
+  return createSpatialPaintSampler(state, viewport)(x, y, cache);
 }

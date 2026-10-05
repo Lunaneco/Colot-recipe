@@ -42,16 +42,13 @@ export function RecipeInspector({
     : PIGMENT_IDS.reduce((sum, key) => sum + recipe[key], 0);
   const waterAmount = sampled?.weights.water ?? recipe.water;
   const overallTotal = pigmentTotal + waterAmount;
-  const renderedSampleVisible =
-    !sampled || sampled.renderedAlpha === undefined || sampled.renderedAlpha > 0;
+  const renderedSampleVisible = !sampled || sampled.coverage > 0.002;
   const hasPigment = pigmentTotal > 0.0001 && renderedSampleVisible;
   const hasMaterial = overallTotal > 0.0001 && renderedSampleVisible;
   const displayWaterRatio = sampled?.waterRatio ?? mixed.waterRatio;
-  const activePigments = renderedSampleVisible
-    ? PIGMENT_IDS.filter((key) =>
-        sampled ? sampled.weights[key] > 0.0001 : recipe[key] > 0,
-      )
-    : [];
+  const activePigments = PIGMENT_IDS.filter((key) =>
+    sampled ? sampled.weights[key] > 0 : recipe[key] > 0,
+  );
 
   return (
     <section
@@ -161,7 +158,7 @@ export function RecipeInspector({
                   <div className="recipe-row__label">
                     <span>{MATERIAL_LABELS[key]}</span>
                     <strong data-testid={`recipe-${key}`}>
-                      {sampled ? localAmount.toFixed(2) : displayRecipe[key]}
+                      {sampled ? (localAmount < 0.01 ? localAmount.toPrecision(2) : localAmount.toFixed(2)) : displayRecipe[key]}
                     </strong>
                     <span className="unit-label">
                       {sampled ? "局所量" : "単位"}

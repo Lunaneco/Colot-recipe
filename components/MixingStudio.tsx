@@ -25,6 +25,7 @@ import {
   useState,
 } from "react";
 import type {
+  ExactPaint,
   MaterialId,
   MixedColorSnapshot,
   MixGesture,
@@ -43,8 +44,11 @@ import {
   PIGMENT_IDS,
 } from "../lib/types";
 import {
-  createSpatialPaintSampler,
+  createSpatialMaterialSampler,
+  paintDabSupportRadii,
+  MAX_WATER_SPREAD,
   sampleSpatialPaint,
+  scaleOpticalStack,
   type SpatialPaintSample,
 } from "../lib/spatialMix";
 import {
@@ -55,9 +59,10 @@ import {
   type StrokePoint,
   type StrokeSamplerState,
 } from "../lib/strokeSampling";
-import { mixPaint, rgbToHex, rgbToHsl } from "../lib/colorScience";
+import { mixPaint, mixPaintProportionsFromRgb } from "../lib/colorScience";
+import { sharedPaintFilmCache, MIXING_PAPER_LINEAR, paletteFilmRgba, displayedPaletteRgb } from "../lib/paintFilm";
+import { renderOpticalStackRgb } from "../lib/opticalStack";
 import {
-  paintStepUnits,
   primaryMaterialForRecipe,
 } from "../lib/paintSteps";
 import { RecipeInspector } from "./RecipeInspector";
@@ -66,6 +71,8 @@ type MixerState = {
   recipe: RecipeUnits;
   steps: PaintStep[];
   mixGestures: MixGesture[];
+  reopenedPaint?: ExactPaint;
+  reopenedSample?: {x: number; y: number};
 };
 
 type MixingStudioProps = {
@@ -330,120 +337,6 @@ function hexToRgba(hex: string, alpha: number) {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-function drawPaintDab(
-  context: CanvasRenderingContext2D,
-  step: PaintStep,
-  index: number,
-  canvasHeight: number,
-  offset = { x: 0, y: 0 },
-) {
-  const x = step.x * CANVAS_WIDTH + offset.x;
-  const y = step.y * canvasHeight + offset.y;
-  const radius = sizeRadius[step.size];
-  const waterUnits = paintStepUnits(step, "water");
-  const pigmentUnits = PIGMENT_IDS.reduce(
-    (total, pigment) => total + paintStepUnits(step, pigment),
-    0,
-  );
-
-  if (waterUnits > 0) {
-    context.save();
-    context.globalAlpha =
-      0.25 + 0.75 * (waterUnits / Math.max(1, waterUnits + pigmentUnits));
-    context.globalCompositeOperation = "screen";
-    const gradient = context.createRadialGradient(
-      x - radius * 0.25,
-      y - radius * 0.3,
-      2,
-      x,
-      y,
-      radius * 1.25,
-    );
-    gradient.addColorStop(0, "rgba(255,255,255,.3)");
-    gradient.addColorStop(0.35, "rgba(159,211,219,.1)");
-    gradient.addColorStop(0.8, "rgba(74,147,160,.025)");
-    gradient.addColorStop(1, "rgba(74,147,160,0)");
-    context.fillStyle = gradient;
-    context.beginPath();
-    context.ellipse(x, y, radius * 1.42, radius * 1.42, 0, 0, Math.PI * 2);
-    context.fill();
-    context.beginPath();
-    context.ellipse(
-      x - radius * 0.26,
-      y - radius * 0.3,
-      radius * 0.24,
-      radius * 0.1,
-      -0.2,
-      0,
-      Math.PI * 2,
-    );
-    context.strokeStyle = "rgba(255,255,255,.5)";
-    context.lineWidth = 1.4;
-    context.stroke();
-    context.restore();
-    return;
-  }
-
-  const color = MATERIAL_COLORS[step.material];
-  const irregularity = 0.08 + hashNoise(index + 8) * 0.08;
-  const points = 28;
-  context.save();
-  context.globalAlpha = step.material === "white" ? 0.78 : 0.94;
-  context.beginPath();
-  for (let point = 0; point <= points; point += 1) {
-    const angle = (point / points) * Math.PI * 2;
-    const wobble =
-      1 +
-      Math.sin(angle * 5 + index) * irregularity +
-      Math.sin(angle * 9 + index * 0.7) * 0.025;
-    const px = x + Math.cos(angle) * radius * wobble;
-    const py = y + Math.sin(angle) * radius * wobble * 0.82;
-    if (point === 0) context.moveTo(px, py);
-    else context.lineTo(px, py);
-  }
-  context.closePath();
-  const gradient = context.createRadialGradient(
-    x - radius * 0.28,
-    y - radius * 0.34,
-    radius * 0.08,
-    x,
-    y,
-    radius * 1.05,
-  );
-  gradient.addColorStop(0, hexToRgba(color, step.material === "white" ? 0.84 : 0.9));
-  gradient.addColorStop(0.5, hexToRgba(color, 0.9));
-  gradient.addColorStop(0.8, hexToRgba(color, 0.72));
-  gradient.addColorStop(1, hexToRgba(color, 0.12));
-  context.fillStyle = gradient;
-  context.shadowColor = hexToRgba(color, 0.12);
-  context.shadowBlur = 15;
-  context.shadowOffsetY = 2;
-  context.fill();
-  context.shadowColor = "transparent";
-
-  context.strokeStyle =
-    step.material === "white"
-      ? "rgba(117,101,84,.14)"
-      : hexToRgba(color, 0.16);
-  context.lineWidth = 1.15;
-  context.stroke();
-
-  context.beginPath();
-  context.ellipse(
-    x - radius * 0.24,
-    y - radius * 0.3,
-    radius * 0.34,
-    radius * 0.12,
-    -0.2,
-    0,
-    Math.PI * 2,
-  );
-  context.strokeStyle = "rgba(255,255,255,.25)";
-  context.lineWidth = Math.max(1.5, radius * 0.025);
-  context.stroke();
-  context.restore();
-}
-
 type SpatialFieldBuffer = {
   canvas: HTMLCanvasElement;
   context: CanvasRenderingContext2D;
@@ -463,18 +356,32 @@ function drawSpatialMixField(
   canvasHeight: number,
 ) {
   if (state.steps.length === 0 && state.mixGestures.length === 0) return;
-  const complexity = state.steps.length + state.mixGestures.length * 4;
-  const targetPixels =
-    complexity > 96 ? 24_000 : complexity > 48 ? 38_000 : 68_000;
-  const aspectRatio = CANVAS_WIDTH / canvasHeight;
-  const fieldWidth = Math.max(
-    112,
-    Math.round(Math.sqrt(targetPixels * aspectRatio)),
-  );
-  const fieldHeight = Math.max(
-    96,
-    Math.round(fieldWidth / aspectRatio),
-  );
+  // Evaluate physical film at source pixels. Upscaling RGB from a small field
+  // averages neighbouring thin films instead of their material, changing a
+  // sampled edge colour on re-expansion. Only the painted bounds need work.
+  const fieldWidth = context.canvas.width;
+  const fieldHeight = context.canvas.height;
+  let minX = CANVAS_WIDTH, minY = canvasHeight, maxX = 0, maxY = 0;
+  const include = (x: number, y: number, rx: number, ry = rx) => {
+    minX = Math.min(minX, x - rx); minY = Math.min(minY, y - ry);
+    maxX = Math.max(maxX, x + rx); maxY = Math.max(maxY, y + ry);
+  };
+  for (const step of state.steps) {
+    const viewport = { width: CANVAS_WIDTH, height: canvasHeight };
+    const pigment = paintDabSupportRadii(step, viewport, MAX_WATER_SPREAD);
+    const water = paintDabSupportRadii(step, viewport, 1, "water");
+    include(step.x * CANVAS_WIDTH, step.y * canvasHeight,
+      Math.max(pigment.x, water.x) * CANVAS_WIDTH,
+      Math.max(pigment.y, water.y) * canvasHeight);
+  }
+  for (const gesture of state.mixGestures) {
+    if (gesture.kind === "all") include(CANVAS_WIDTH * .5, canvasHeight * .51, 235, 137);
+    else for (const point of gesture.path ?? []) include(point.x * CANVAS_WIDTH, point.y * canvasHeight, 100);
+  }
+  const x0 = Math.max(0, Math.floor(minX / CANVAS_WIDTH * fieldWidth));
+  const x1 = Math.min(fieldWidth - 1, Math.ceil(maxX / CANVAS_WIDTH * fieldWidth));
+  const y0 = Math.max(0, Math.floor(minY / canvasHeight * fieldHeight));
+  const y1 = Math.min(fieldHeight - 1, Math.ceil(maxY / canvasHeight * fieldHeight));
   let buffer = spatialFieldBuffers.get(context);
   if (
     !buffer ||
@@ -498,29 +405,33 @@ function drawSpatialMixField(
     buffer.pixels.data.fill(0);
   }
   const { canvas: field, context: fieldContext, pixels } = buffer;
-  const colourCache = new Map<string, SpatialPaintSample["mixed"]>();
-  const sample = createSpatialPaintSampler(state, {
+  const sample = createSpatialMaterialSampler(state, {
     width: CANVAS_WIDTH,
     height: canvasHeight,
   });
 
-  for (let y = 0; y < fieldHeight; y += 1) {
-    for (let x = 0; x < fieldWidth; x += 1) {
+  for (let y = y0; y <= y1; y += 1) {
+    for (let x = x0; x <= x1; x += 1) {
       const sampledPixel = sample(
         (x + 0.5) / fieldWidth,
         (y + 0.5) / fieldHeight,
-        colourCache,
       );
-      if (sampledPixel.coverage <= 0.002) continue;
       const offset = (y * fieldWidth + x) * 4;
+      if (sampledPixel.coverage <= 0) {
+        // Clear water has no coloured reflectance. Retain its footprint alpha
+        // while leaving the white paper's displayed RGB exactly unchanged.
+        if (sampledPixel.weights.water > 0) pixels.data.set(paletteFilmRgba(
+          MIXING_PAPER_LINEAR, 1 - Math.exp(-sampledPixel.weights.water * .35),
+        ), offset);
+        continue;
+      }
       const dryBody = (1 - sampledPixel.waterRatio) ** 2;
-      // Undiluted tube paint forms a dense body with a clean boundary.
-      // Water continues to bypass this body mask and uses the softer raw
-      // coverage below, so only deliberately wetted areas become a wash.
+      // Dabs (one unit or more) read as solid paint, while the thin tail of
+      // a smear lets the paper show through as its weight runs out.
       const edgeStart = 0.045;
       const edgeProgress = Math.min(
         1,
-        Math.max(0, (sampledPixel.coverage - edgeStart) / 0.18),
+        Math.max(0, (sampledPixel.coverage - edgeStart) / 0.5),
       );
       const bodyCoverage =
         edgeProgress * edgeProgress * (3 - 2 * edgeProgress);
@@ -528,25 +439,24 @@ function drawSpatialMixField(
         1,
         Math.max(
           0,
-          (sampledPixel.coverage * (1 - dryBody) +
+          sampledPixel.coverage * (1 - dryBody) +
             bodyCoverage *
               (0.86 + 0.14 * sampledPixel.coverage) *
-          dryBody),
+              dryBody,
         ),
       );
-      // The spatial kernel describes how a dab reaches its edge; it must not
-      // dilute undisturbed tube paint a second time. Keep the dry body dense,
-      // then hand alpha control back to the exact local concentration as soon
-      // as water is present.
-      const renderedOpacity =
-        sampledPixel.mixed.opacity * (1 - dryBody) +
-        Math.max(0.98, sampledPixel.mixed.opacity) * dryBody;
-      pixels.data[offset] = sampledPixel.mixed.rgb.r;
-      pixels.data[offset + 1] = sampledPixel.mixed.rgb.g;
-      pixels.data[offset + 2] = sampledPixel.mixed.rgb.b;
-      pixels.data[offset + 3] = Math.round(
-        renderedCoverage * renderedOpacity * 255,
+      const amounts = PIGMENT_IDS.map((p) => sampledPixel.weights[p]);
+      const pigmentMass = amounts.reduce((sum, value) => sum + value, 0);
+      const concentration = pigmentMass /
+        Math.max(1e-12, pigmentMass + sampledPixel.weights.water * 1.45);
+      const appearance = sampledPixel.opticalStack
+        ? renderOpticalStackRgb(sampledPixel.opticalStack, sampledPixel.opticalStackScale ?? 1, MIXING_PAPER_LINEAR)
+        : sharedPaintFilmCache.over(
+        amounts,
+        pigmentMass * concentration ** 0.8,
+        MIXING_PAPER_LINEAR,
       );
+      pixels.data.set(paletteFilmRgba(appearance, renderedCoverage * concentration), offset);
     }
   }
 
@@ -554,7 +464,7 @@ function drawSpatialMixField(
   context.save();
   context.imageSmoothingEnabled = true;
   context.globalCompositeOperation = "source-over";
-  context.drawImage(field, 0, 0, CANVAS_WIDTH, canvasHeight);
+  context.drawImage(field, 0, 0, fieldWidth, fieldHeight);
   context.restore();
 }
 
@@ -565,13 +475,8 @@ function drawMixerState(
 ) {
   const context = canvas.getContext("2d");
   if (!context) return;
-  context.clearRect(0, 0, CANVAS_WIDTH, canvasHeight);
+  context.clearRect(0, 0, canvas.width, canvas.height);
   drawSpatialMixField(context, state, canvasHeight);
-  state.steps.forEach((step, index) => {
-    if (paintStepUnits(step, "water") > 0) {
-      drawPaintDab(context, step, index, canvasHeight);
-    }
-  });
 }
 
 export function MixingStudio({
@@ -650,6 +555,7 @@ export function MixingStudio({
     MixerState | undefined
   >(undefined);
   const [webglReady, setWebglReady] = useState(false);
+  const [renderSize, setRenderSize] = useState({width: CANVAS_WIDTH, height: DEFAULT_CANVAS_HEIGHT});
   const [canvasHeight, setCanvasHeight] = useState(DEFAULT_CANVAS_HEIGHT);
   const [samplePoint, setSamplePoint] = useState<{ x: number; y: number }>();
   const [sampledPaint, setSampledPaint] = useState<SpatialPaintSample>();
@@ -776,9 +682,14 @@ export function MixingStudio({
     const updateCanvasHeight = () => {
       const rect = surface.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return;
-      const nextHeight = Math.max(
-        480,
-        Math.min(2200, Math.round((CANVAS_WIDTH * rect.height) / rect.width)),
+      const ratio = Math.min(3, window.devicePixelRatio || 1);
+      const width = Math.max(1, Math.round(surface.clientWidth * ratio));
+      const height = Math.max(1, Math.round(surface.clientHeight * ratio));
+      setRenderSize(current => current.width === width && current.height === height ? current : {width, height});
+      // Keep virtual material coordinates at the same aspect ratio as the
+      // actual inner canvas, including short iPhone SE viewports.
+      const nextHeight = Math.max(1,
+        Math.round(CANVAS_WIDTH * surface.clientHeight / surface.clientWidth),
       );
       setCanvasHeight((current) =>
         Math.abs(current - nextHeight) > 2 ? nextHeight : current,
@@ -852,28 +763,29 @@ export function MixingStudio({
 
   const captureSample = useCallback(
     (point: { x: number; y: number }) => {
+      const source = paintCanvas.current;
+      // The canvas sits inside the surface border and the screen samples a
+      // raster pixel centre. Read its material at that same position, rather
+      // than a nearby continuous coordinate on a steep overlap boundary.
+      const sampledPoint = source ? {
+        x: (Math.min(source.width - 1, Math.max(0, Math.floor(point.x * source.width))) + .5) / source.width,
+        y: (Math.min(source.height - 1, Math.max(0, Math.floor(point.y * source.height))) + .5) / source.height,
+      } : point;
       const sample = sampleSpatialPaint(
         state,
-        point.x,
-        point.y,
+        sampledPoint.x,
+        sampledPoint.y,
         undefined,
         { width: CANVAS_WIDTH, height: canvasHeight },
       );
-      const pixel = readRenderedPixel(point);
-      const renderedAlpha = pixel
-        ? Math.round((pixel[3] / 255) * 1_000) / 1_000
-        : undefined;
-      if (pixel) {
-        sample.renderedAlpha = renderedAlpha;
-      }
+      if (sample.opticalStack) sample.exactPaint.opticalStack = scaleOpticalStack(sample.opticalStack, sample.opticalStackScale ?? 1);
+      const pixel = readRenderedPixel(sampledPoint);
       if (pixel && pixel[3] > 0) {
-        const rgb = { r: pixel[0], g: pixel[1], b: pixel[2] };
+        const rgb = displayedPaletteRgb(pixel);
         sample.mixed = {
-          ...sample.mixed,
-          hex: rgbToHex(rgb),
-          rgb,
-          hsl: rgbToHsl(rgb),
-          opacity: renderedAlpha ?? 0,
+          ...mixPaintProportionsFromRgb(sample.weights, rgb),
+          // RGB already includes the paper visible through this film.
+          opacity: 1,
         };
       }
       setSampledPaint(sample);
@@ -918,17 +830,27 @@ export function MixingStudio({
   const redraw = useCallback(() => {
     const canvas = paintCanvas.current;
     if (!canvas) return;
+    if (canvas.width !== renderSize.width || canvas.height !== renderSize.height) {
+      canvas.width = renderSize.width; canvas.height = renderSize.height;
+    }
     drawMixerState(canvas, state, canvasHeight);
     if (textureRef.current && textureRef.current.image !== canvas) {
       textureRef.current.image = canvas;
     }
     updateTexture();
     authoritativeRedrawCompleteRef.current();
-  }, [canvasHeight, state, updateTexture]);
+  }, [canvasHeight, renderSize, state, updateTexture]);
 
   useEffect(() => {
     redraw();
   }, [redraw]);
+
+  useEffect(() => {
+    if (!state.reopenedSample) return;
+    const point = state.reopenedSample;
+    const frame = window.requestAnimationFrame(() => setSamplePoint(point));
+    return () => window.cancelAnimationFrame(frame);
+  }, [state.reopenedSample]);
 
   useEffect(() => {
     if (!isPicker || !samplePoint) return;
@@ -1028,17 +950,10 @@ export function MixingStudio({
               void main() {
                 vec4 base = texture2D(paintMap, vUv);
                 if (base.a < .005) discard;
-                float leftA = texture2D(paintMap, vUv - vec2(texel.x * 4.0, 0.)).a;
-                float rightA = texture2D(paintMap, vUv + vec2(texel.x * 4.0, 0.)).a;
-                float downA = texture2D(paintMap, vUv - vec2(0., texel.y * 4.0)).a;
-                float upA = texture2D(paintMap, vUv + vec2(0., texel.y * 4.0)).a;
-                vec3 normal = normalize(vec3((leftA-rightA)*.72, (downA-upA)*.72, .78));
-                vec3 light = normalize(vec3(-.42, .66, .82));
-                float diffuse = .9 + max(dot(normal, light), 0.) * .1;
-                float specular = pow(max(dot(reflect(-light, normal), vec3(0.,0.,1.)), 0.), 18.0);
-                float grain = sin(vUv.x * 740. + vUv.y * 430.) * .009;
-                vec3 color = base.rgb * (diffuse + grain) + vec3(specular * .09 * base.a);
-                gl_FragColor = vec4(color, base.a);
+                // Paint colour and paper transmission are already resolved
+                // by the spectral film renderer. Preserve those same bytes
+                // for WebGL, 2D, live previews and saved/reopened samples.
+                gl_FragColor = base;
                 #include <colorspace_fragment>
               }
             `,
@@ -1083,10 +998,10 @@ export function MixingStudio({
     const renderer = rendererRef.current;
     if (!renderer) return;
     setWebglReady(false);
-    renderer.setSize(CANVAS_WIDTH, canvasHeight, false);
+    renderer.setSize(renderSize.width, renderSize.height, false);
     const texel = shaderMaterialRef.current?.uniforms.texel?.value;
     if (texel && typeof texel.set === "function") {
-      texel.set(1 / CANVAS_WIDTH, 1 / canvasHeight);
+      texel.set(1 / renderSize.width, 1 / renderSize.height);
     }
     if (frameRef.current) window.cancelAnimationFrame(frameRef.current);
     frameRef.current = window.requestAnimationFrame(() => {
@@ -1094,7 +1009,7 @@ export function MixingStudio({
       renderRef.current?.();
       setWebglReady(true);
     });
-  }, [canvasHeight]);
+  }, [renderSize]);
 
   const toNormalizedPoint = (
     sample: PointerSample,
@@ -1245,7 +1160,7 @@ export function MixingStudio({
   useEffect(() => {
     const lastRequest = lastLiveCanvasRequestRef.current;
     if (lastRequest) paintLiveCanvasPreviewRef.current(lastRequest);
-  }, [canvasHeight]);
+  }, [renderSize]);
 
   const scheduleLiveCanvasPreview = (request: LiveCanvasRequest) => {
     pendingLiveCanvasRef.current = {
@@ -1780,8 +1695,8 @@ export function MixingStudio({
               <canvas
                 ref={paintCanvas}
                 className={`paint-layer paint-layer--source ${webglReady ? "is-webgl" : ""}`}
-                width={CANVAS_WIDTH}
-                height={canvasHeight}
+                width={renderSize.width}
+                height={renderSize.height}
                 aria-hidden="true"
               />
               {isPicker && samplePoint && (
@@ -1799,15 +1714,15 @@ export function MixingStudio({
               <canvas
                 ref={glossCanvas}
                 className={`paint-layer paint-layer--gloss ${webglReady ? "is-ready" : ""}`}
-                width={CANVAS_WIDTH}
-                height={canvasHeight}
+                width={renderSize.width}
+                height={renderSize.height}
                 aria-hidden="true"
               />
               <canvas
                 ref={gesturePreviewCanvas}
                 className="paint-layer paint-layer--gesture-preview"
-                width={CANVAS_WIDTH}
-                height={canvasHeight}
+                width={renderSize.width}
+                height={renderSize.height}
                 data-testid="paint-stroke-preview"
                 aria-hidden="true"
               />

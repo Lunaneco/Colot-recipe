@@ -35,8 +35,9 @@ async function alphaSummary(canvas: Locator): Promise<AlphaSummary> {
     let maxAlpha = 0;
     for (let offset = 3; offset < pixels.length; offset += 4) {
       const alpha = pixels[offset];
-      if (alpha > 0) alphaPixels += 1;
-      if (alpha > maxAlpha) maxAlpha = alpha;
+      const contrast = Math.max(255 - pixels[offset - 3], 255 - pixels[offset - 2], 255 - pixels[offset - 1]);
+      if (alpha > 0 && contrast > 1) alphaPixels += 1;
+      if (alpha > 0 && contrast > maxAlpha) maxAlpha = contrast;
     }
     return { alphaPixels, maxAlpha };
   });
@@ -61,7 +62,7 @@ async function maxAlphaNear(
       const pixels = context.getImageData(x, y, width, height).data;
       let maxAlpha = 0;
       for (let offset = 3; offset < pixels.length; offset += 4) {
-        maxAlpha = Math.max(maxAlpha, pixels[offset]);
+        maxAlpha = Math.max(maxAlpha, 255 - pixels[offset - 3], 255 - pixels[offset - 2], 255 - pixels[offset - 1]);
       }
       return maxAlpha;
     },
@@ -162,7 +163,7 @@ test("描き始めを待たせず、実際の終点まで描いて一度で元�
   await expect
     .poll(() => maxAlphaNear(layer, end.intrinsic))
     .toBeGreaterThan(200);
-  expect((await encodingCalls(page)).length).toBeGreaterThanOrEqual(2);
+  await expect.poll(async () => (await encodingCalls(page)).length).toBeGreaterThanOrEqual(2);
 
   const painted = await alphaSummary(layer);
   expect(painted.alphaPixels).toBeGreaterThan(1_000);

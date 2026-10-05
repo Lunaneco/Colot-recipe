@@ -24,15 +24,57 @@ import {
   useState,
 } from "react";
 import {
+  applyStamp,
+  beginStrokeDynamics,
+  completeTap,
+  nextSpacing,
+  strokeSpacing,
+  type BrushDynamicsSettings,
+  type PaintLoad,
+  type StrokeDynamicsState,
+} from "../lib/brushDynamics";
+import { hexToRgb } from "../lib/colorScience";
+import {
   fillEnclosedRegion,
   prepareUploadedLineArt,
+  type PixelBounds,
 } from "../lib/paintEngine";
+import {
+  applyPigmentPatch,
+  capturePigmentPatch,
+  createPigmentField,
+  createStrokeShadow,
+  fillPigmentRegion,
+  massForCoverage,
+  pigmentVectorFromRatio,
+  shadowPatch,
+  unionBounds,
+  wetBounds as findWetBounds,
+  type PigmentField,
+  type PigmentPatch,
+  type StrokeShadow,
+} from "../lib/pigmentField";
+import { pigmentsFromRgb } from "../lib/pigmentInverse";
+import { advancePaintDrying, PAINT_DRYING_INTERVAL_MS } from "../lib/paintDrying";
+import {
+  decodeStoredPigmentField,
+  renderCompositeToCanvas,
+  snapshotPigmentLayer,
+} from "../lib/pigmentLayer";
 import {
   loadColoringProgress,
   loadSetting,
   saveColoringProgress,
   saveSetting,
 } from "../lib/storage";
+import {
+  appendStrokeSamples,
+  beginStrokeSampling,
+  finishStrokeSampling,
+  stabilizeStrokePoint,
+  type StrokePoint,
+  type StrokeSamplerState,
+} from "../lib/strokeSampling";
 import type { MixedColorSnapshot } from "../lib/types";
 import {
   CanvasZoomControls,
@@ -74,17 +116,57 @@ type StoredColoringSettings = {
 };
 
 type StoredColoringProgress = {
+  /** Rendered paint layer (transparent PNG). Legacy saves hold the whole paper. */
   dataUrl: string;
+  /** Encoded pigment, mass, body and water planes; absent on legacy saves. */
+  pigmentDataUrls?: string[];
+  pigmentSavedAt?: number;
   sourceId: string;
   updatedAt: string;
 };
 
-type BrushStrokeSettings = {
-  colorHex: string;
-  colorName: string;
-  opacity: number;
-  size: number;
+type ColoringHistoryEntry = {
+  before: PigmentPatch;
+  after: PigmentPatch;
 };
+
+type ActiveBrushStroke = {
+  sampler: StrokeSamplerState;
+  dynamics: StrokeDynamicsState;
+  settings: BrushDynamicsSettings;
+  spacing: number;
+  /** Lazily records the paint under the stroke for undo. */
+  shadow: StrokeShadow;
+  bounds: PixelBounds | null;
+};
+
+const BRUSH_STABILIZATION = 0.25;
+
+function paintLoadFromColor(color: MixedColorSnapshot): PaintLoad {
+  let pigment = pigmentVectorFromRatio(color.pigmentRatio ?? {});
+  let total = 0;
+  for (const value of pigment) total += value;
+  if (total <= 0) pigment = pigmentsFromRgb(hexToRgb(color.hex));
+  return {
+    pigment,
+    waterRatio: Math.min(0.97, Math.max(0, color.waterRatio ?? 0)),
+    opacity: Math.min(1, Math.max(0.02, color.opacity ?? 1)),
+    opticalMass: color.exactPaint?.opticalMass,
+    opticalStack: color.exactPaint?.opticalStack,
+  };
+}
+
+function brushDynamicsSettings(brushSize: number): BrushDynamicsSettings {
+  return {
+    size: brushSize,
+    opacity: 1,
+    pressureSensitivity: 0.6,
+    water: 0,
+    bleed: 0.1,
+    hardness: 0.72,
+    spacing: 0.16,
+  };
+}
 
 const TEMPLATES: TemplateDefinition[] = [
   { id: "bear", label: "くま", description: "にっこりテディベア", icon: PawPrint },
@@ -97,6 +179,7 @@ const TEMPLATES: TemplateDefinition[] = [
 
 const WIDTH = 920;
 const HEIGHT = 720;
+
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 const MAX_UPLOAD_DIMENSION = 8192;
 const MAX_UPLOAD_PIXELS = 32_000_000;
@@ -396,52 +479,14 @@ const DRAW_TEMPLATE: Record<
 };
 
 async function loadImage(dataUrl: string) {
-  if (!isSafeStoredImageDataUrl(dataUrl)) {
-    throw new Error("画像データの形式が安全ではありません");
-  }
+  if (!isSafeStoredImageDataUrl(dataUrl)) throw new Error("保存画像が正しくありません");
   const image = new Image();
   await new Promise<void>((resolve, reject) => {
     image.onload = () => resolve();
     image.onerror = () => reject(new Error("画像を読み込めません"));
     image.src = dataUrl;
   });
-  assertSafeImageDimensions(image.naturalWidth, image.naturalHeight);
   return image;
-}
-
-function isSafeStoredImageDataUrl(value: unknown): value is string {
-  const prefix = "data:image/png;base64,";
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    value.length > MAX_STORED_IMAGE_CHARS ||
-    !value.startsWith(prefix)
-  ) {
-    return false;
-  }
-  if (!/^[A-Za-z0-9+/]*={0,2}$/u.test(value.slice(prefix.length))) {
-    return false;
-  }
-  try {
-    const header = atob(value.slice(prefix.length, prefix.length + 44));
-    const signature = [137, 80, 78, 71, 13, 10, 26, 10];
-    if (
-      header.length < 24 ||
-      !signature.every((byte, index) => header.charCodeAt(index) === byte)
-    ) {
-      return false;
-    }
-    const dimension = (offset: number) =>
-      ((header.charCodeAt(offset) << 24) |
-        (header.charCodeAt(offset + 1) << 16) |
-        (header.charCodeAt(offset + 2) << 8) |
-        header.charCodeAt(offset + 3)) >>>
-      0;
-    assertSafeImageDimensions(dimension(16), dimension(20));
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function assertSafeImageDimensions(width: number, height: number) {
@@ -520,14 +565,39 @@ async function stableImageId(dataUrl: string) {
   return `fnv1a-${(hash >>> 0).toString(16).padStart(8, "0")}-${bytes.length}`;
 }
 
-function imageDataToPngDataUrl(imageData: ImageData) {
-  const canvas = document.createElement("canvas");
-  canvas.width = imageData.width;
-  canvas.height = imageData.height;
-  const context = canvas.getContext("2d");
-  if (!context) return undefined;
-  context.putImageData(imageData, 0, 0);
-  return canvas.toDataURL("image/png");
+function isSafeStoredImageDataUrl(value: unknown): value is string {
+  const prefix = "data:image/png;base64,";
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_STORED_IMAGE_CHARS ||
+    !value.startsWith(prefix)
+  ) {
+    return false;
+  }
+  if (!/^[A-Za-z0-9+/]*={0,2}$/u.test(value.slice(prefix.length))) {
+    return false;
+  }
+  try {
+    const header = atob(value.slice(prefix.length, prefix.length + 44));
+    const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+    if (
+      header.length < 24 ||
+      !signature.every((byte, index) => header.charCodeAt(index) === byte)
+    ) {
+      return false;
+    }
+    const dimension = (offset: number) =>
+      ((header.charCodeAt(offset) << 24) |
+        (header.charCodeAt(offset + 1) << 16) |
+        (header.charCodeAt(offset + 2) << 8) |
+        header.charCodeAt(offset + 3)) >>>
+      0;
+    assertSafeImageDimensions(dimension(16), dimension(20));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function coalescedPointerSamples(
@@ -564,18 +634,30 @@ export function ColoringStudio({
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
   const mobileInspector = useRef<HTMLElement>(null);
   const mobileInspectorToggle = useRef<HTMLButtonElement>(null);
-  const fillCanvas = useRef<HTMLCanvasElement>(null);
+  /** The one canvas on screen: paper, paint and ink composited in linear light. */
+  const displayCanvas = useRef<HTMLCanvasElement>(null);
+  /**
+   * Off-screen sources: `paper` holds the sheet (and a flattened legacy
+   * picture, if any), `ink` the line art. Their pixels are cached in
+   * `sourceImages` for the compositor and the fill tool.
+   */
   const lineCanvas = useRef<HTMLCanvasElement>(null);
+  const sourceCanvases = useRef<{
+    paper: HTMLCanvasElement;
+    ink: HTMLCanvasElement;
+  } | null>(null);
+  const sourceImages = useRef<{ paper: ImageData; ink: ImageData } | null>(null);
   const uploadInput = useRef<HTMLInputElement>(null);
   const pointerId = useRef<number | undefined>(undefined);
-  const previousPoint = useRef<{ x: number; y: number } | undefined>(
-    undefined,
-  );
-  const brushBefore = useRef<ImageData | undefined>(undefined);
-  const activeBrush = useRef<BrushStrokeSettings | undefined>(undefined);
-  const undoStack = useRef<string[]>([]);
-  const redoStack = useRef<string[]>([]);
+  const field = useRef<PigmentField>(createPigmentField(WIDTH, HEIGHT));
+  const stroke = useRef<ActiveBrushStroke | null>(null);
+  const wetBounds = useRef<PixelBounds | null>(null);
+  const dryingTimer = useRef<number | undefined>(undefined);
+  const dryingLastTime = useRef(0);
+  const undoStack = useRef<ColoringHistoryEntry[]>([]);
+  const redoStack = useRef<ColoringHistoryEntry[]>([]);
   const redrawGeneration = useRef(0);
+  const progressReady = useRef(false);
   const [historyAvailability, setHistoryAvailability] = useState({
     undo: 0,
     redo: 0,
@@ -663,8 +745,6 @@ export function ColoringStudio({
         brushSize,
         uploadedImage,
         uploadedImageId,
-      }).catch(() => {
-        setStatus("設定を端末に保存できませんでした");
       });
     }, 180);
     return () => window.clearTimeout(timer);
@@ -686,20 +766,127 @@ export function ColoringStudio({
         : undefined
       : `progress-v2-${template}`;
 
+  const getSourceCanvases = useCallback(() => {
+    if (!sourceCanvases.current) {
+      const make = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = WIDTH;
+        canvas.height = HEIGHT;
+        return canvas;
+      };
+      sourceCanvases.current = { paper: make(), ink: lineCanvas.current ?? make() };
+    }
+    return sourceCanvases.current;
+  }, []);
+
+  /**
+   * Redraws `bounds` (or everything) of the picture: the paint field over
+   * the paper with the line art on top, composited in linear light. This is
+   * the only route to the screen, so the export shows the same bytes.
+   */
+  const renderPaint = useCallback((bounds: PixelBounds | null) => {
+    const canvas = displayCanvas.current;
+    const images = sourceImages.current;
+    if (!canvas || !images) return;
+    renderCompositeToCanvas(
+      canvas,
+      images.paper,
+      [
+        { kind: "paint", field: field.current },
+        { kind: "image", image: images.ink },
+      ],
+      bounds,
+    );
+  }, []);
+
+  /** Re-reads the off-screen paper and ink into the compositor's cache. */
+  const refreshSources = useCallback(() => {
+    const { paper, ink } = getSourceCanvases();
+    const paperContext = paper.getContext("2d", { willReadFrequently: true });
+    const inkContext = ink.getContext("2d", { willReadFrequently: true });
+    if (!paperContext || !inkContext) return;
+    sourceImages.current = {
+      paper: paperContext.getImageData(0, 0, WIDTH, HEIGHT),
+      ink: inkContext.getImageData(0, 0, WIDTH, HEIGHT),
+    };
+  }, [getSourceCanvases]);
+
+  const persist = useCallback(async () => {
+    if (!activeProgressKey || !progressReady.current) return;
+    const snapshot = snapshotPigmentLayer(field.current);
+    await saveColoringProgress(activeProgressKey, {
+      dataUrl: snapshot.dataUrl,
+      pigmentDataUrls: snapshot.pigmentDataUrls,
+      pigmentSavedAt: snapshot.pigmentSavedAt,
+      sourceId: template === "upload" ? uploadedImageId! : template,
+      updatedAt: new Date().toISOString(),
+    } satisfies StoredColoringProgress);
+    setStatus("進み具合を保存しました");
+  }, [activeProgressKey, template, uploadedImageId]);
+
+  const latestPersist = useRef(persist);
+  useEffect(() => {
+    latestPersist.current = persist;
+  }, [persist]);
+  useEffect(() => {
+    const flush = () => { void latestPersist.current().catch(() => {}); };
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
+  }, []);
+
+  const stopDrying = useCallback(() => {
+    if (dryingTimer.current !== undefined) {
+      window.clearInterval(dryingTimer.current);
+      dryingTimer.current = undefined;
+    }
+  }, []);
+
+  const markWet = useCallback(
+    (bounds: PixelBounds | null) => {
+      if (!bounds) return;
+      wetBounds.current = unionBounds(wetBounds.current, bounds) ?? bounds;
+      if (dryingTimer.current !== undefined) return;
+      dryingLastTime.current = Date.now();
+      dryingTimer.current = window.setInterval(() => {
+        const wet = wetBounds.current;
+        if (!wet) {
+          stopDrying();
+          return;
+        }
+        const now = Date.now();
+        wetBounds.current = advancePaintDrying(field.current, dryingLastTime.current, now, wet);
+        dryingLastTime.current = now;
+        renderPaint(wet);
+        if (!wetBounds.current) {
+          stopDrying();
+          void persist();
+        }
+      }, PAINT_DRYING_INTERVAL_MS);
+    },
+    [persist, renderPaint, stopDrying],
+  );
+
+  useEffect(() => () => stopDrying(), [stopDrying]);
+
   const redrawTemplate = useCallback(
     async (restore = true) => {
+      progressReady.current = false;
       const generation = redrawGeneration.current + 1;
       redrawGeneration.current = generation;
-      const fill = fillCanvas.current;
-      const line = lineCanvas.current;
-      if (!fill || !line) return;
-      const fillContext = fill.getContext("2d", { willReadFrequently: true });
-      const lineContext = line.getContext("2d", { willReadFrequently: true });
-      if (!fillContext || !lineContext) return;
-      fillContext.clearRect(0, 0, WIDTH, HEIGHT);
-      fillContext.fillStyle = "#ffffff";
-      fillContext.fillRect(0, 0, WIDTH, HEIGHT);
-      lineContext.clearRect(0, 0, WIDTH, HEIGHT);
+      const { paper, ink } = getSourceCanvases();
+      const paperContext = paper.getContext("2d", { willReadFrequently: true });
+      const inkContext = ink.getContext("2d", { willReadFrequently: true });
+      if (!paperContext || !inkContext) return;
+      paperContext.clearRect(0, 0, WIDTH, HEIGHT);
+      paperContext.fillStyle = "#ffffff";
+      paperContext.fillRect(0, 0, WIDTH, HEIGHT);
+      inkContext.clearRect(0, 0, WIDTH, HEIGHT);
+      stopDrying();
+      field.current = createPigmentField(WIDTH, HEIGHT);
+      wetBounds.current = null;
 
       if (template === "upload" && uploadedImage) {
         const image = await loadImage(uploadedImage);
@@ -709,32 +896,56 @@ export function ColoringStudio({
         const height = image.height * scale;
         const x = (WIDTH - width) / 2;
         const y = (HEIGHT - height) / 2;
-        lineContext.drawImage(image, x, y, width, height);
-        const pixels = lineContext.getImageData(0, 0, WIDTH, HEIGHT);
+        inkContext.drawImage(image, x, y, width, height);
+        const pixels = inkContext.getImageData(0, 0, WIDTH, HEIGHT);
         prepareUploadedLineArt(pixels);
-        lineContext.putImageData(pixels, 0, 0);
-        fillContext.drawImage(line, 0, 0);
+        inkContext.putImageData(pixels, 0, 0);
       } else if (template !== "upload") {
-        DRAW_TEMPLATE[template](lineContext);
-        fillContext.drawImage(line, 0, 0);
+        DRAW_TEMPLATE[template](inkContext);
       }
+      refreshSources();
+      renderPaint(null);
 
       if (restore && activeProgressKey) {
         const saved =
           await loadColoringProgress<StoredColoringProgress>(activeProgressKey);
         if (generation !== redrawGeneration.current) return;
-        if (isSafeStoredImageDataUrl(saved?.dataUrl)) {
+        if (saved?.pigmentDataUrls) {
+          const restored = await decodeStoredPigmentField({
+            ...saved,
+            pigmentSavedAt: saved.pigmentSavedAt ?? Date.parse(saved.updatedAt),
+          }, WIDTH, HEIGHT);
+          if (generation !== redrawGeneration.current) return;
+          field.current = restored;
+          markWet(findWetBounds(restored));
+          renderPaint(null);
+        } else if (isSafeStoredImageDataUrl(saved?.dataUrl)) {
+          // Progress saved before the pigment engine is a flattened paper
+          // image; keep it visible underneath and paint on top of it.
           const image = await loadImage(saved.dataUrl);
           if (generation !== redrawGeneration.current) return;
-          fillContext.clearRect(0, 0, WIDTH, HEIGHT);
-          fillContext.drawImage(image, 0, 0, WIDTH, HEIGHT);
+          paperContext.clearRect(0, 0, WIDTH, HEIGHT);
+          paperContext.drawImage(image, 0, 0, WIDTH, HEIGHT);
+          refreshSources();
+          renderPaint(null);
         }
       }
       undoStack.current = [];
       redoStack.current = [];
+      progressReady.current = true;
       refreshHistory();
     },
-    [activeProgressKey, refreshHistory, template, uploadedImage],
+    [
+      activeProgressKey,
+      getSourceCanvases,
+      refreshHistory,
+      refreshSources,
+      renderPaint,
+      markWet,
+      stopDrying,
+      template,
+      uploadedImage,
+    ],
   );
 
   useEffect(() => {
@@ -744,46 +955,27 @@ export function ColoringStudio({
     });
   }, [redrawTemplate, settingsHydrated]);
 
-  const canvasPoint = (
-    event: Pick<PointerEvent, "clientX" | "clientY">,
-    rect: DOMRect,
-  ) => {
-    return {
-      x: Math.max(
-        0,
-        Math.min(
-          WIDTH - 1,
-          ((event.clientX - rect.left) / Math.max(1, rect.width)) * WIDTH,
-        ),
-      ),
-      y: Math.max(
-        0,
-        Math.min(
-          HEIGHT - 1,
-          ((event.clientY - rect.top) / Math.max(1, rect.height)) * HEIGHT,
-        ),
-      ),
-    };
-  };
+  const canvasPoint = (event: PointerEvent, rect: DOMRect): StrokePoint => ({
+    x: ((event.clientX - rect.left) / Math.max(1, rect.width)) * WIDTH,
+    y: ((event.clientY - rect.top) / Math.max(1, rect.height)) * HEIGHT,
+    pressure:
+      event.pressure > 0
+        ? event.pressure
+        : event.pointerType === "mouse"
+          ? 0.5
+          : 0.35,
+    time: event.timeStamp,
+  });
 
-  const persist = useCallback(async () => {
-    const dataUrl = fillCanvas.current?.toDataURL("image/png");
-    if (!dataUrl || !activeProgressKey) return;
-    await saveColoringProgress(activeProgressKey, {
-      dataUrl,
-      sourceId: template === "upload" ? uploadedImageId! : template,
-      updatedAt: new Date().toISOString(),
-    } satisfies StoredColoringProgress);
-    setStatus("進み具合を保存しました");
-  }, [activeProgressKey, template, uploadedImageId]);
-
-  const pushHistory = useCallback((before: string) => {
-    if (!fillCanvas.current) return;
-    undoStack.current = [...undoStack.current.slice(-11), before];
-    redoStack.current = [];
-    refreshHistory();
-    void persist();
-  }, [persist, refreshHistory]);
+  const pushHistory = useCallback(
+    (entry: ColoringHistoryEntry) => {
+      undoStack.current = [...undoStack.current.slice(-11), entry];
+      redoStack.current = [];
+      refreshHistory();
+      void persist();
+    },
+    [persist, refreshHistory],
+  );
 
   useEffect(() => {
     if (!mobileInspectorOpen) return;
@@ -831,29 +1023,26 @@ export function ColoringStudio({
     return () => media.removeEventListener("change", closeOutsideMobile);
   }, []);
 
-  const drawSnapshot = async (dataUrl: string) => {
-    const canvas = fillCanvas.current;
-    if (!canvas) return;
-    const image = await loadImage(dataUrl);
-    const context = canvas.getContext("2d");
-    context?.clearRect(0, 0, WIDTH, HEIGHT);
-    context?.drawImage(image, 0, 0);
-  };
-
   const undo = () => {
-    const snapshot = undoStack.current.pop();
-    if (!snapshot || !fillCanvas.current) return;
-    redoStack.current.push(fillCanvas.current.toDataURL("image/png"));
-    void drawSnapshot(snapshot).then(() => persist());
+    const entry = undoStack.current.pop();
+    if (!entry) return;
+    redoStack.current.push(entry);
+    applyPigmentPatch(field.current, entry.before);
+    renderPaint(entry.before.bounds);
+    markWet(findWetBounds(field.current, entry.before.bounds));
     refreshHistory();
+    void persist();
   };
 
   const redo = () => {
-    const snapshot = redoStack.current.pop();
-    if (!snapshot || !fillCanvas.current) return;
-    undoStack.current.push(fillCanvas.current.toDataURL("image/png"));
-    void drawSnapshot(snapshot).then(() => persist());
+    const entry = redoStack.current.pop();
+    if (!entry) return;
+    undoStack.current.push(entry);
+    applyPigmentPatch(field.current, entry.after);
+    renderPaint(entry.after.bounds);
+    markWet(findWetBounds(field.current, entry.after.bounds));
     refreshHistory();
+    void persist();
   };
 
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -865,45 +1054,53 @@ export function ColoringStudio({
     ) {
       return;
     }
-    const canvas = fillCanvas.current;
-    const line = lineCanvas.current;
-    const context = canvas?.getContext("2d", { willReadFrequently: true });
-    const lineContext = line?.getContext("2d", { willReadFrequently: true });
-    if (!canvas || !line || !context || !lineContext) return;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    pointerId.current = event.pointerId;
-    const point = canvasPoint(
-      event.nativeEvent,
-      event.currentTarget.getBoundingClientRect(),
-    );
+    const images = sourceImages.current;
+    if (!images || !displayCanvas.current || !progressReady.current) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const point = canvasPoint(event.nativeEvent, rect);
+    const paint = paintLoadFromColor(color);
 
     if (paintMode === "fill") {
-      const before = canvas.toDataURL("image/png");
-      previousPoint.current = point;
-      (event.currentTarget as HTMLDivElement).dataset.before = before;
-      const imageData = context.getImageData(0, 0, WIDTH, HEIGHT);
-      const lineImageData = lineContext.getImageData(0, 0, WIDTH, HEIGHT);
-      const value = color.hex.replace("#", "");
-      const rgb = [
-        Number.parseInt(value.slice(0, 2), 16),
-        Number.parseInt(value.slice(2, 4), 16),
-        Number.parseInt(value.slice(4, 6), 16),
-      ] as const;
+      const lineImageData = images.ink;
+      const scratch = {
+        width: WIDTH,
+        height: HEIGHT,
+        data: new Uint8ClampedArray(WIDTH * HEIGHT * 4),
+      };
       const result = fillEnclosedRegion(
         lineImageData,
-        imageData,
+        scratch,
         point.x,
         point.y,
-        [rgb[0], rgb[1], rgb[2], Math.max(5, Math.round(color.opacity * 255))],
+        [255, 255, 255, 255],
         {
           boundaryAlphaThreshold: Math.max(12, 96 - tolerance),
           gapGuardRadius: gapGuard,
           maxPixels: WIDTH * HEIGHT,
         },
       );
-      if (result.changedPixels > 0) {
-        context.putImageData(imageData, 0, 0);
-        pushHistory(before);
+      if (result.changedPixels > 0 && result.bounds) {
+        const bounds = result.bounds;
+        const mask = new Uint8Array(bounds.width * bounds.height);
+        for (let y = 0; y < bounds.height; y += 1) {
+          for (let x = 0; x < bounds.width; x += 1) {
+            const offset = ((bounds.y + y) * WIDTH + bounds.x + x) * 4 + 3;
+            if (scratch.data[offset] === 255) mask[y * bounds.width + x] = 1;
+          }
+        }
+        const before = capturePigmentPatch(field.current, bounds);
+        fillPigmentRegion(
+          field.current,
+          bounds,
+          mask,
+          paint.pigment,
+          massForCoverage(Math.min(0.995, paint.opacity), paint.pigment),
+          paint.waterRatio * 0.5,
+        );
+        const after = capturePigmentPatch(field.current, bounds);
+        renderPaint(bounds);
+        if (paint.waterRatio > 0.08) markWet(bounds);
+        if (before && after) pushHistory({ before, after });
         setStatus(`${colorName}で${result.changedPixels.toLocaleString()}画素を塗りました`);
       } else {
         setStatus(
@@ -911,131 +1108,135 @@ export function ColoringStudio({
             ? "線の上ではなく、枠の内側をタップしてください"
             : result.reason === "open-region"
               ? "線のすき間が大きいため塗れません。線のすき間補正を上げてください"
-            : result.reason === "no-change"
-              ? "この枠はすでに同じ色で塗られています"
               : "塗りたい枠の内側をタップしてください",
         );
       }
-      event.currentTarget.releasePointerCapture(event.pointerId);
-      pointerId.current = undefined;
-      previousPoint.current = undefined;
-      delete event.currentTarget.dataset.before;
       return;
     }
 
-    brushBefore.current = context.getImageData(0, 0, WIDTH, HEIGHT);
-    activeBrush.current = {
-      colorHex: color.hex,
-      colorName,
-      opacity: Math.max(0.02, color.opacity),
-      size: brushSize,
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // A pointer that is already gone (fast tap) cannot be captured.
+    }
+    pointerId.current = event.pointerId;
+    const settings = brushDynamicsSettings(brushSize);
+    const current: ActiveBrushStroke = {
+      sampler: beginStrokeSampling(point),
+      dynamics: beginStrokeDynamics(
+        "round",
+        settings,
+        paint,
+        Math.floor(point.x * 7919 + point.y * 104729 + point.time),
+      ),
+      settings,
+      spacing: strokeSpacing("round", settings),
+      shadow: createStrokeShadow(field.current),
+      bounds: null,
     };
-    previousPoint.current = point;
-    context.save();
-    context.globalAlpha = activeBrush.current.opacity;
-    context.fillStyle = activeBrush.current.colorHex;
-    context.beginPath();
-    context.arc(point.x, point.y, activeBrush.current.size / 2, 0, Math.PI * 2);
-    context.fill();
-    context.restore();
+    stroke.current = current;
+    stampPlacements(current, [point]);
   };
 
-  const paintBrushSamples = (
-    event: React.PointerEvent<HTMLDivElement>,
-    includeEndpoint = false,
+  const stampPlacements = (
+    current: ActiveBrushStroke,
+    placements: readonly StrokePoint[],
+    render = true,
   ) => {
-    if (
-      pointerId.current !== event.pointerId ||
-      !previousPoint.current ||
-      !activeBrush.current
-    ) {
-      return;
+    let dirty: PixelBounds | null = null;
+    for (const placement of placements) {
+      dirty = unionBounds(
+        dirty,
+        applyStamp(
+          field.current,
+          current.dynamics,
+          placement,
+          current.settings,
+          current.shadow,
+        ),
+      );
     }
-    const canvas = fillCanvas.current;
-    const context = canvas?.getContext("2d");
-    if (!canvas || !context) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    let samples = coalescedPointerSamples(event);
-    const lastSample = samples[samples.length - 1];
-    if (
-      includeEndpoint &&
-      (lastSample.clientX !== event.nativeEvent.clientX ||
-        lastSample.clientY !== event.nativeEvent.clientY ||
-        lastSample.timeStamp !== event.nativeEvent.timeStamp)
-    ) {
-      samples = [...samples, event.nativeEvent];
+    current.spacing = nextSpacing(current.dynamics, current.settings);
+    if (dirty) {
+      current.bounds = unionBounds(current.bounds, dirty);
+      if (render) renderPaint(dirty);
     }
-    const points = samples.map((sample) =>
-      canvasPoint(sample, rect),
-    );
-    let previous = previousPoint.current;
-    const path = points.filter((point) => {
-      if (point.x === previous.x && point.y === previous.y) return false;
-      previous = point;
-      return true;
-    });
-    if (path.length === 0) return;
-    const brush = activeBrush.current;
-    context.save();
-    context.lineCap = "round";
-    context.lineJoin = "round";
-    context.lineWidth = brush.size;
-    context.globalAlpha = brush.opacity;
-    context.strokeStyle = brush.colorHex;
-    context.beginPath();
-    context.moveTo(previousPoint.current.x, previousPoint.current.y);
-    path.forEach((point) => context.lineTo(point.x, point.y));
-    context.stroke();
-    context.restore();
-    previousPoint.current = path[path.length - 1];
+    return dirty;
   };
 
   const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
-    paintBrushSamples(event);
-  };
-
-  const finishBrushStroke = (
-    event: React.PointerEvent<HTMLDivElement>,
-    includeEndpoint: boolean,
-  ) => {
-    if (
-      pointerId.current !== event.pointerId ||
-      !activeBrush.current
-    ) {
-      return;
-    }
-    if (includeEndpoint) {
-      paintBrushSamples(event, true);
-    }
-    pointerId.current = undefined;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-    const brush = activeBrush.current;
-    const beforeImageData = brushBefore.current;
-    previousPoint.current = undefined;
-    activeBrush.current = undefined;
-    brushBefore.current = undefined;
-    const before = beforeImageData
-      ? imageDataToPngDataUrl(beforeImageData)
-      : undefined;
-    const after = fillCanvas.current?.toDataURL("image/png");
-    if (before && after && before !== after) {
-      pushHistory(before);
-      setStatus(`${brush.colorName}でブラシ塗りしました`);
-    } else {
-      setStatus("キャンバスに変化はありませんでした");
-    }
+    const current = stroke.current;
+    if (!current || pointerId.current !== event.pointerId) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    let previous = current.sampler.lastInput;
+    const inputs = coalescedPointerSamples(event).map((sample) => {
+      const next = stabilizeStrokePoint(
+        previous,
+        canvasPoint(sample, rect),
+        BRUSH_STABILIZATION,
+      );
+      previous = next;
+      return next;
+    });
+    let samplingState = current.sampler;
+    let remaining: StrokePoint[] = inputs;
+    let eventDirty: PixelBounds | null = null;
+    do {
+      // One placement per pass so the spacing can adapt to the stamp size.
+      const sampled = appendStrokeSamples(samplingState, remaining, {
+        spacing: current.spacing,
+        maxPoints: 2,
+      });
+      eventDirty = unionBounds(eventDirty, stampPlacements(current, sampled.added, false));
+      const latest = sampled.state.placements[sampled.state.placements.length - 1];
+      samplingState = { ...sampled.state, placements: [latest] };
+      remaining = sampled.remainingInput;
+    } while (remaining.length > 0);
+    current.sampler = samplingState;
+    if (eventDirty) renderPaint(eventDirty);
   };
 
   const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
-    finishBrushStroke(event, true);
-  };
-
-  const handlePointerCancel = (
-    event: React.PointerEvent<HTMLDivElement>,
-  ) => {
-    finishBrushStroke(event, false);
+    const current = stroke.current;
+    if (!current || pointerId.current !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    pointerId.current = undefined;
+    stroke.current = null;
+    if (event.type === "pointerup") {
+      const rect = event.currentTarget.getBoundingClientRect();
+      const endpoint = stabilizeStrokePoint(
+        current.sampler.lastInput,
+        canvasPoint(event.nativeEvent, rect),
+        BRUSH_STABILIZATION,
+      );
+      const finished = finishStrokeSampling(current.sampler, endpoint, {
+        spacing: current.spacing,
+        maxPoints: 4_096,
+      });
+      stampPlacements(current, finished.added);
+      const topped = completeTap(
+        field.current,
+        current.dynamics,
+        finished.state.placements[finished.state.placements.length - 1] ?? endpoint,
+        current.settings,
+        current.shadow,
+      );
+      if (topped) {
+        current.bounds = unionBounds(current.bounds, topped);
+        renderPaint(topped);
+      }
+    }
+    if (!current.bounds) {
+      setStatus("キャンバスに変化はありませんでした");
+      return;
+    }
+    if (current.dynamics.depositWetness > 0.04) markWet(current.bounds);
+    const before = shadowPatch(current.shadow, current.bounds);
+    const after = capturePigmentPatch(field.current, current.bounds);
+    if (before && after) pushHistory({ before, after });
+    setStatus(`${colorName}でブラシ塗りしました`);
   };
 
   const selectTemplate = (next: TemplateId) => {
@@ -1044,19 +1245,12 @@ export function ColoringStudio({
     setStatus(`${label}の線画を選択中`);
   };
 
+  /** Saves exactly the pixels on screen: the same linear-light composite. */
   const exportPng = () => {
-    const fill = fillCanvas.current;
-    const line = lineCanvas.current;
-    if (!fill || !line) return;
-    const output = document.createElement("canvas");
-    output.width = WIDTH;
-    output.height = HEIGHT;
-    const context = output.getContext("2d");
-    if (!context) return;
-    context.drawImage(fill, 0, 0);
-    context.drawImage(line, 0, 0);
+    const canvas = displayCanvas.current;
+    if (!canvas) return;
     const anchor = document.createElement("a");
-    anchor.href = output.toDataURL("image/png");
+    anchor.href = canvas.toDataURL("image/png");
     anchor.download = `カラーレシピぬりえ-${template}.png`;
     anchor.click();
   };
@@ -1232,24 +1426,18 @@ export function ColoringStudio({
                   onPointerDown={handlePointerDown}
                   onPointerMove={handlePointerMove}
                   onPointerUp={handlePointerUp}
-                  onPointerCancel={handlePointerCancel}
-                  onLostPointerCapture={handlePointerCancel}
+                  onPointerCancel={handlePointerUp}
+                  onLostPointerCapture={handlePointerUp}
                   data-testid="coloring-canvas"
                 >
-                  <canvas
-                    ref={fillCanvas}
-                    width={WIDTH}
-                    height={HEIGHT}
-                    className="coloring-layer coloring-layer--fill"
-                    aria-hidden="true"
-                  />
-                  <canvas
-                    ref={lineCanvas}
-                    width={WIDTH}
-                    height={HEIGHT}
-                    className="coloring-layer coloring-layer--line"
-                    aria-hidden="true"
-                  />
+            <canvas
+              ref={displayCanvas}
+              width={WIDTH}
+              height={HEIGHT}
+              className="coloring-layer coloring-layer--fill"
+              aria-hidden="true"
+            />
+            <canvas ref={lineCanvas} width={WIDTH} height={HEIGHT} hidden className="coloring-layer--line" aria-hidden="true" />
                 </div>
               </div>
             </div>

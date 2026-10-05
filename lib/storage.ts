@@ -328,6 +328,110 @@ function clearFallbackStore(store: StoreName) {
 
 const writeQueues = new Map<StoreName, Promise<void>>();
 
+type PaintStoreName = "artworks" | "coloring";
+type PendingSnapshot = { version: 1; generation: string; value: unknown; valueInMirror?: boolean };
+type JournalWrite = { key: string; serialized: string };
+type JournalAttempt = { key: string; generation: string; written?: JournalWrite; previous?: JournalWrite };
+let journalSequence = 0;
+const latestPaintWrites = new Map<string, string>();
+
+const pendingPrefix = (store: PaintStoreName) => `${FALLBACK_PREFIX}pending:${store}:`;
+
+/** The unload handler must reach durable storage before its first await. */
+function journalPaintSnapshot(store: PaintStoreName, key: string, value: unknown): JournalAttempt {
+  const attempt: JournalAttempt = {
+    key: `${pendingPrefix(store)}${key}`,
+    generation: `${Date.now()}:${++journalSequence}:${Math.random()}`,
+  };
+  latestPaintWrites.set(attempt.key, attempt.generation);
+  try {
+    const storage = browserLocalStorage();
+    const previous = storage.getItem(attempt.key);
+    if (previous !== null) attempt.previous = { key: attempt.key, serialized: previous };
+    const snapshot: PendingSnapshot = {
+      version: 1,
+      generation: attempt.generation,
+      value,
+    };
+    const serialized = JSON.stringify(snapshot);
+    storage.setItem(attempt.key, serialized);
+    attempt.written = { key: attempt.key, serialized };
+  } catch {
+    // A full/blocked LocalStorage must not prevent the normal IndexedDB write.
+  }
+  return attempt;
+}
+
+function readPendingSnapshot(store: PaintStoreName, key: string): PendingSnapshot | undefined {
+  try {
+    const raw = browserLocalStorage().getItem(`${pendingPrefix(store)}${key}`);
+    if (raw === null) return undefined;
+    const decoded = JSON.parse(raw);
+    if (decoded && decoded.version === 1 && typeof decoded.generation === "string") {
+      if (decoded.valueInMirror === true) {
+        const value = readFallback<unknown>(store, key);
+        if (value !== undefined) return { ...decoded, value } as PendingSnapshot;
+      } else if (Object.prototype.hasOwnProperty.call(decoded, "value")) return decoded as PendingSnapshot;
+    }
+  } catch {
+    // Ignore unavailable or malformed recovery data and use the normal stores.
+  }
+  return undefined;
+}
+
+function primaryPaintCommitted(attempt: JournalAttempt) {
+  if (latestPaintWrites.get(attempt.key) !== attempt.generation) return;
+  clearMatchingJournal(attempt.written ?? attempt.previous);
+  latestPaintWrites.delete(attempt.key);
+}
+
+function fallbackPaintCommitted(attempt: JournalAttempt) {
+  if (latestPaintWrites.get(attempt.key) !== attempt.generation) return;
+  try {
+    const storage = browserLocalStorage();
+    const current = storage.getItem(attempt.key);
+    // Keep the full journal while the primary still contains an older picture.
+    if (attempt.written && current === attempt.written.serialized) return;
+    if (current !== (attempt.previous?.serialized ?? null)) return;
+    // If quota blocked the full snapshot, the committed mirror only needs a
+    // small freshness marker so a stale primary cannot hide it on reload.
+    storage.setItem(attempt.key, JSON.stringify({
+      version: 1, generation: attempt.generation, valueInMirror: true,
+    }));
+  } catch {
+    // The already completed fallback write remains available without IDB.
+  } finally {
+    latestPaintWrites.delete(attempt.key);
+  }
+}
+
+function clearMatchingJournal(journal: JournalWrite | undefined) {
+  if (!journal) return;
+  try {
+    const storage = browserLocalStorage();
+    if (storage.getItem(journal.key) === journal.serialized) storage.removeItem(journal.key);
+  } catch {
+    // Leaving a committed journal is safe: it contains the same latest picture.
+  }
+}
+
+function paintJournals(store: PaintStoreName): JournalWrite[] {
+  try {
+    const storage = browserLocalStorage();
+    const prefix = pendingPrefix(store);
+    const entries: JournalWrite[] = [];
+    for (let index = 0; index < storage.length; index++) {
+      const key = storage.key(index);
+      if (!key?.startsWith(prefix)) continue;
+      const serialized = storage.getItem(key);
+      if (serialized !== null) entries.push({ key, serialized });
+    }
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
 function enqueueStoreWrite(
   store: StoreName,
   operation: () => Promise<void>,
@@ -350,23 +454,31 @@ function writeToAtLeastOneBackend(
   label: string,
   idbOperation: () => Promise<void>,
   fallbackOperation: () => void,
+  onPrimaryCommit?: () => void,
+  onFallbackOnlyCommit?: () => void,
 ) {
   return enqueueStoreWrite(store, async () => {
     const causes: unknown[] = [];
     let written = false;
+    let primaryWritten = false;
+    let fallbackWritten = false;
     try {
       await idbOperation();
       written = true;
+      primaryWritten = true;
     } catch (error) {
       causes.push(error);
     }
     try {
       fallbackOperation();
       written = true;
+      fallbackWritten = true;
     } catch (error) {
       causes.push(error);
     }
     if (!written) throw new StorageWriteError(label, causes);
+    if (primaryWritten) onPrimaryCommit?.();
+    else if (fallbackWritten) onFallbackOnlyCommit?.();
   });
 }
 
@@ -374,24 +486,32 @@ async function clearFromAtLeastOneBackend(
   store: StoreName,
   label: string,
 ) {
+  const journals = store === "artworks" || store === "coloring" ? paintJournals(store) : [];
   await writeToAtLeastOneBackend(
     store,
     label,
     () => idbClear(store),
     () => clearFallbackStore(store),
   );
+  journals.forEach(clearMatchingJournal);
 }
 
 async function loadMirroredValue<T>(
   store: KeyValueStoreName,
   key: string,
 ): Promise<T | undefined> {
+  const pending = store === "artworks" || store === "coloring" ? readPendingSnapshot(store, key) : undefined;
+  if (pending) return pending.value as T;
   try {
     const value = await idbGet<T>(store, key);
+    const latest = store === "artworks" || store === "coloring" ? readPendingSnapshot(store, key) : undefined;
+    if (latest) return latest.value as T;
     if (value !== undefined) return value;
   } catch {
     // Try the recovery mirror below.
   }
+  const latest = store === "artworks" || store === "coloring" ? readPendingSnapshot(store, key) : undefined;
+  if (latest) return latest.value as T;
   return readFallback<T>(store, key);
 }
 
@@ -472,11 +592,14 @@ export async function loadSetting<T>(key: string): Promise<T | undefined> {
 }
 
 export async function saveArtwork(key: string, value: unknown): Promise<void> {
+  const journal = journalPaintSnapshot("artworks", key, value);
   await writeToAtLeastOneBackend(
     "artworks",
     "作品",
     () => idbPut("artworks", value, key),
     () => writeFallback("artworks", key, value),
+    () => primaryPaintCommitted(journal),
+    () => fallbackPaintCommitted(journal),
   );
 }
 
@@ -488,11 +611,14 @@ export async function saveColoringProgress(
   key: string,
   value: unknown,
 ): Promise<void> {
+  const journal = journalPaintSnapshot("coloring", key, value);
   await writeToAtLeastOneBackend(
     "coloring",
     "塗り絵の進み具合",
     () => idbPut("coloring", value, key),
     () => writeFallback("coloring", key, value),
+    () => primaryPaintCommitted(journal),
+    () => fallbackPaintCommitted(journal),
   );
 }
 
@@ -660,6 +786,17 @@ function validateResourceStrings(value: JsonValue, path: string): void {
   }
 }
 
+function validateStoredPigment(value: Record<string, JsonValue>, width: number, height: number, path: string) {
+  if (value.pigmentSavedAt !== undefined && (typeof value.pigmentSavedAt !== "number" || !Number.isFinite(value.pigmentSavedAt) || value.pigmentSavedAt < 0)) throw new AppBackupError(`${path}の顔料保存日時が正しくありません`);
+  if (value.pigmentDataUrls === undefined) return;
+  if (!Array.isArray(value.pigmentDataUrls) || value.pigmentDataUrls.length < 2 || value.pigmentDataUrls.length > 5) throw new AppBackupError(`${path}の顔料平面が正しくありません`);
+  value.pigmentDataUrls.forEach((url, i) => {
+    if (typeof url !== "string") throw new AppBackupError(`${path}の顔料平面が正しくありません`);
+    const dimensions = embeddedPngDimensions(url, `${path}.pigmentDataUrls[${i}]`);
+    if (i < 4 && (dimensions.width !== width || dimensions.height !== height)) throw new AppBackupError(`${path}の顔料平面の寸法がキャンバスと一致しません`);
+  });
+}
+
 function validateArtwork(value: JsonValue, path: string) {
   if (!backupRecord(value) || !Array.isArray(value.layers)) {
     throw new AppBackupError(`${path}の作品データが正しくありません`);
@@ -707,6 +844,7 @@ function validateArtwork(value: JsonValue, path: string) {
       throw new AppBackupError(`${path}に重複したレイヤーIDがあります`);
     }
     ids.add(layer.id);
+    validateStoredPigment(layer, width, height, layerPath);
     if (layer.dataUrl !== undefined) {
       if (typeof layer.dataUrl !== "string") {
         throw new AppBackupError(`${layerPath}.dataUrlが正しくありません`);
@@ -743,6 +881,7 @@ function validateColoringProgress(value: JsonValue, path: string) {
   ) {
     throw new AppBackupError(`${path}の塗り絵データが正しくありません`);
   }
+  validateStoredPigment(value, 920, 720, path);
   const dimensions = embeddedPngDimensions(value.dataUrl, `${path}.dataUrl`);
   if (dimensions.width !== 920 || dimensions.height !== 720) {
     throw new AppBackupError(`${path}.dataUrlの寸法が塗り絵と一致しません`);
@@ -903,6 +1042,13 @@ async function loadAllMirroredEntries(
   } catch {
     // The LocalStorage mirror above is still exportable.
   }
+  if (store === "artworks" || store === "coloring") {
+    for (const journal of paintJournals(store)) {
+      const key = journal.key.slice(pendingPrefix(store).length);
+      const pending = readPendingSnapshot(store, key);
+      if (pending) merged.set(key, pending.value);
+    }
+  }
   return [...merged.entries()]
     .sort(([left], [right]) => left.localeCompare(right, "ja"))
     .map(([key, value]) => ({
@@ -936,6 +1082,8 @@ async function writeBackupEntry(
   store: KeyValueStoreName,
   entry: AppBackupEntry,
 ) {
+  if (store === "artworks") return saveArtwork(entry.key, entry.value);
+  if (store === "coloring") return saveColoringProgress(entry.key, entry.value);
   await writeToAtLeastOneBackend(
     store,
     `${store}の「${entry.key}」`,

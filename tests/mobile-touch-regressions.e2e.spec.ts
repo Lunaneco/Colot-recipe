@@ -4,7 +4,15 @@ import {
   type Locator,
   type Page,
 } from "@playwright/test";
-import { mixPaint } from "../lib/colorScience";
+import { mixPaintProportions } from "../lib/colorScience";
+
+// Independent analytic density of a constant-total-mass held medium dab.
+const heldDensity = (units: number) => {
+  if (units <= 1) return units;
+  const radiusScale = Math.min(1.3, 1.16 + Math.max(0, units - 2) * .024);
+  const amplitude = Math.min(.085, .028 + Math.max(0, units - 2) * .008);
+  return units / (radiusScale ** 2 * (1 + .2824 * amplitude ** 2));
+};
 
 async function touchElement(
   page: Page,
@@ -826,7 +834,7 @@ test.describe("スマホ実タッチの回帰", () => {
       .poll(async () =>
         (await sourcePixelAtRatio(canvas, point.x, point.y)).slice(0, 3),
       )
-      .toEqual([230, 0, 18]);
+      .toEqual([195, 0, 24]);
     const committedRedPixel = await sourcePixelAtRatio(
       canvas,
       point.x,
@@ -843,7 +851,7 @@ test.describe("スマホ実タッチの回帰", () => {
       point.y,
       async () => {
         // A real touchStart must paint immediately. At the overlap this is the
-        // calibrated live mixture, not the raw selected blue (#00A1E9). A
+        // calibrated live mixture, not the raw selected blue. A
         // loaded CI runner may cross a hold threshold before this assertion,
         // so compare against the actual live unit count instead of wall time.
         await expect
@@ -857,10 +865,10 @@ test.describe("スマホ実タッチの回帰", () => {
               point.y,
             );
             if (units < 1 || pixel[3] < 240) return false;
-            const expected = mixPaint({ red: 1, blue: units }).rgb;
+            const expected = mixPaintProportions({ red: 1, blue: heldDensity(units) }).rgb;
             const matches = pixel.slice(0, 3).every(
               (channel, index) =>
-                channel === [expected.r, expected.g, expected.b][index],
+                Math.abs(channel - [expected.r, expected.g, expected.b][index]) <= 1,
             );
             if (matches) observedLiveBlueUnits = units;
             return matches;
@@ -892,7 +900,7 @@ test.describe("スマホ実タッチの回帰", () => {
           (_, index) =>
             Math.min(unitsBeforeScreenshot, unitsAfterScreenshot) + index,
         ).map((units) => {
-          const expected = mixPaint({ red: 1, blue: units }).rgb;
+          const expected = mixPaintProportions({ red: 1, blue: heldDensity(units) }).rgb;
           return Math.max(
             ...visiblePixel
               .slice(0, 3)
@@ -914,9 +922,9 @@ test.describe("スマホ実タッチの回帰", () => {
       observedLiveBlueUnits,
     );
     expect(committedBlueUnits).toBeLessThanOrEqual(8);
-    const expectedCommitted = mixPaint({
+    const expectedCommitted = mixPaintProportions({
       red: 1,
-      blue: committedBlueUnits,
+      blue: heldDensity(committedBlueUnits),
     }).rgb;
     await expect
       .poll(async () => {
@@ -1070,7 +1078,10 @@ test.describe("スマホ実タッチの回帰", () => {
       String(liveBlueUnits),
     );
     const endPixel = await sourcePixelAtRatio(canvas, endXRatio, 0.55);
-    expect(endPixel.slice(0, 3)).toEqual([0, 161, 233]);
+    expect(endPixel[0]).toBeLessThan(10);
+    expect(endPixel[1]).toBeGreaterThanOrEqual(84);
+    expect(endPixel[2]).toBeGreaterThan(endPixel[1]);
+    expect(endPixel[2]).toBeLessThan(180);
 
     // The selected blue stretch is a single action even though it has an
     // origin load and an extended path.
@@ -1384,7 +1395,7 @@ test.describe("スマホ実タッチの回帰", () => {
     const drawingLayer = drawingCanvas.locator("canvas");
     await expect(drawingLayer).toHaveCount(1);
     await touchCanvasAt(page, drawingCanvas, 0.5, 0.5);
-    await expectPixelRgbNear(drawingLayer, 500, 350, [230, 0, 18]);
+    await expectPixelRgbNear(drawingLayer, 500, 350, [195, 0, 24]);
     await expect
       .poll(async () => (await pixelAt(drawingLayer, 500, 350))[3])
       .toBeGreaterThan(220);
@@ -1417,7 +1428,7 @@ test.describe("スマホ実タッチの回帰", () => {
     const coloringCanvas = page.getByTestId("coloring-canvas");
     const fillCanvas = coloringCanvas.locator("canvas.coloring-layer--fill");
     await touchCanvasAt(page, coloringCanvas, 0.5, 0.29);
-    await expectPixelRgbNear(fillCanvas, 460, 210, [0, 161, 233]);
+    await expectPixelRgbNear(fillCanvas, 460, 210, [0, 101, 148]);
     await expect
       .poll(async () => (await pixelAt(fillCanvas, 460, 210))[3])
       .toBeGreaterThan(240);

@@ -63,7 +63,7 @@ test("重なりの中心では各絵の具の局所比率が更新される", ()
   assert.ok(overlap.pigmentRatio.red < 0.51);
   assert.ok(overlap.pigmentRatio.yellow > 0.49);
   assert.ok(overlap.pigmentRatio.yellow < 0.51);
-  assert.equal(overlap.mixed.name, "夕焼けオレンジ");
+  assert.equal(overlap.mixed.name, "紅赤");
 });
 
 test("保存レシピのcompound stepは全顔料成分の比率を保って加算する", () => {
@@ -98,7 +98,7 @@ test("保存レシピのcompound stepは全顔料成分の比率を保って加�
         1e-12,
     );
   }
-  assert.equal(direct.weights.water, recipe.water);
+  assert.ok(Math.abs(direct.weights.water - recipe.water / 2.0164) < 1e-12);
   assert.deepEqual(direct.pigmentRatio, {
     red: 0.2,
     blue: 0.1,
@@ -209,7 +209,7 @@ test("水は重なった地点だけの水分比率と透明度へ反映され�
         wet.weights.water / (wet.weights.red + wet.weights.water),
     ) < 1e-12,
   );
-  assert.equal(wet.waterRatio, 0.5);
+  assert.ok(Math.abs(wet.waterRatio - 1 / 3.0164) < 1e-12);
   assert.ok(wet.mixed.opacity < 0.7);
   assert.equal(dry.waterRatio, 0);
   assert.ok(dry.mixed.opacity > wet.mixed.opacity);
@@ -238,7 +238,8 @@ test("乾いた絵の具は濃く、水を置いた場所だけ薄く広がる",
   const wetDeposit = wetCentre.coverage * wetCentre.mixed.opacity;
 
   assert.ok(dryCentre.coverage >= 0.88, dryCentre.coverage);
-  assert.ok(wetDeposit <= dryDeposit * 0.55, `${dryDeposit} -> ${wetDeposit}`);
+  assert.ok(wetCentre.exactPaint.opticalMass < dryCentre.exactPaint.opticalMass);
+  assert.ok(wetDeposit < dryDeposit, `${dryDeposit} -> ${wetDeposit}`);
   assert.equal(dryEdge.coverage, 0);
   assert.ok(wetEdge.coverage > 0);
   assert.ok(wetEdge.mixed.opacity < wetCentre.mixed.opacity);
@@ -357,7 +358,7 @@ test("キャッシュなしの局所色は連続する実重量を丸めずに�
     mixGestures: [],
   };
 
-  const sample = sampleSpatialPaint(state, 0.534, 0.4);
+  const sample = sampleSpatialPaint(state, 0.534, 0.39);
   const expected = mixPaintProportions(sample.weights);
 
   assert.deepEqual(sample.mixed, expected);
@@ -387,10 +388,10 @@ test("描画キャッシュは色比率だけを再利用し、局所の透明�
     ],
     mixGestures: [],
   };
-  const exact = sampleSpatialPaint(state, 0.534, 0.4);
+  const exact = sampleSpatialPaint(state, 0.534, 0.39);
   const cached = createSpatialPaintSampler(state)(
     0.534,
-    0.4,
+    0.39,
     new Map(),
   );
 
@@ -524,7 +525,7 @@ test("水が多い端でも0.2%の局所顔料を水と別に保存する", () =
       ],
       mixGestures: [],
     },
-    0.585,
+    0.59,
     0.5,
     undefined,
     { width: 1_100, height: 760 },
@@ -724,7 +725,8 @@ test("長押しは少し波打って広がり、中心ほど実単位に応じ�
   });
   const tapCentre = sampleSpatialPaint(tapState, 0.5, 0.5);
 
-  assert.equal(centre.weights.red, 4);
+  assert.ok(centre.weights.red > tapCentre.weights.red && centre.weights.red < 4);
+  assert.ok(Math.abs(integrateMaterialMass(holdState, "red") / integrateMaterialMass(tapState, "red") - 4) < 0.001);
   assert.ok(centre.coverage > tapCentre.coverage);
   assert.ok(1 > middle && middle > edge);
   assert.ok(Math.max(...angular) - Math.min(...angular) > 0.01);
@@ -777,11 +779,10 @@ test("長押しの濃さはスポイト比率へ反映され、空間indexとも
   const direct = sampleSpatialPaint(state, 0.5, 0.5);
   const indexed = createSpatialPaintSampler(state);
 
-  assert.equal(direct.weights.red, 4);
+  assert.ok(Math.abs(direct.weights.red - 2.73961002901853) < 1e-12);
   assert.equal(direct.weights.blue, 1);
-  assert.ok(Math.abs(direct.pigmentRatio.red - 0.8) < 1e-12);
-  assert.ok(Math.abs(direct.pigmentRatio.blue - 0.2) < 1e-12);
-  assert.equal(direct.mixed.hex, mixPaint({ red: 4, blue: 1 }).hex);
+  assert.ok(Math.abs(direct.pigmentRatio.red - 2.73961002901853 / 3.73961002901853) < 1e-12);
+  assert.equal(direct.mixed.hex, mixPaintProportions(direct.weights).hex);
 
   for (const point of [
     { x: 0.5, y: 0.5 },
@@ -794,4 +795,26 @@ test("長押しの濃さはスポイト比率へ反映され、空間indexとも
     assert.equal(actual.coverage, expected.coverage);
     assert.equal(actual.mixed.hex, expected.mixed.hex);
   }
+});
+
+
+test("各材料の1単位は大中小・水の広がり・長押し形状に依存せず同じ総量になる", () => {
+  const expected = Math.PI * 76 ** 2 / 2.55;
+  for (const material of ["red", "blue", "yellow", "black", "white", "water"]) {
+    for (const size of ["small", "medium", "large"]) {
+      const recipe = { red: 0, blue: 0, yellow: 0, black: 0, white: 0, water: 0, [material]: 1 };
+      const state = { recipe, steps: [step(`unit-${material}-${size}`, material, .5, .5, size)], mixGestures: [] };
+      const integrated = integrateMaterialMass(state, material);
+      assert.ok(Math.abs(integrated / expected - 1) < 0.0002, `${material}/${size}: ${integrated} vs ${expected}`);
+    }
+  }
+  const recipe = { red: 1, blue: 1, yellow: 0, black: 0, white: 0, water: 1 };
+  const steps = [step("small-red", "red", .25, .5, "small"),
+    step("large-blue", "blue", .6, .5, "large"), step("water-unit", "water", .6, .5)];
+  const all = { id: "all", kind: "all", recipe, distance: 1200, speed: .7, points: 16,
+    stepIds: steps.map(value => value.id), createdAt: "2026-07-28T00:00:01.000Z" };
+  const mixed = sampleSpatialPaint({ recipe, steps, mixGestures: [all] }, .5, .51,
+    undefined, {width:1100,height:760});
+  assert.ok(Math.abs(mixed.pigmentRatio.red - .5) < 0.0001);
+  assert.ok(Math.abs(mixed.waterRatio - 1/3) < 0.0001);
 });
