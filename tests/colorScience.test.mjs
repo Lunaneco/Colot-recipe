@@ -119,12 +119,12 @@ test("同比率の倍率と材料オブジェクトの順序で混色結果は�
   );
 });
 
-test("最初の赤・青・黄・黒は指定された基準色と一致する", () => {
+test("原色のスウォッチは実測K/SをD65で積分したマストーンと一致する", () => {
   const expected = {
-    red: "#E60012",
-    blue: "#00A1E9",
-    yellow: "#FFF100",
-    black: "#000000",
+    red: "#BD0015",
+    blue: "#00547F",
+    yellow: "#FED200",
+    black: "#1D1E20",
   };
 
   assert.deepEqual(
@@ -231,7 +231,7 @@ test("黒は不透明な絵の具として働き、水では色を変えずに�
   const red = mixPaint({ red: 1 });
   const darkRed = mixPaint({ red: 2, black: 1 });
 
-  assert.equal(black.hex, "#000000");
+  assert.equal(black.hex, "#1D1E20");
   assert.ok(black.opacity >= 0.95, black.opacity);
   assert.ok(black.intensity > 0.9, black.intensity);
   assert.equal(black.name, "黒");
@@ -241,13 +241,13 @@ test("黒は不透明な絵の具として働き、水では色を変えずに�
   assert.equal(darkRed.pigmentRatio.black, 0.3333);
 });
 
-test("赤＋黄はRGB平均ではない自然なオレンジになる", () => {
+test("赤＋黄は実測顔料の朱赤となり、RGB平均と異なる", () => {
   const orange = mixPaint({ red: 1, yellow: 1 });
 
-  assert.ok(orange.hsl.h >= 5 && orange.hsl.h <= 52, orange.hex);
+  assert.ok(orange.hsl.h === 4, orange.hex);
   assert.ok(orange.rgb.r > orange.rgb.g);
   assert.ok(orange.rgb.g > orange.rgb.b);
-  assert.equal(orange.name, "夕焼けオレンジ");
+  assert.equal(orange.name, "紅赤");
   assert.notDeepEqual(orange.rgb, { r: 128, g: 128, b: 0 });
 });
 
@@ -288,9 +288,9 @@ test("実測プロファイルの代表配合は校正版スナップショッ�
   const orange = mixPaint({ red: 3, yellow: 2, white: 1, water: 2 });
   const diluted = mixPaint({ red: 3, yellow: 2, white: 1, water: 20 });
 
-  assert.equal(orange.hex, "#E2573F");
-  assert.deepEqual(orange.rgb, { r: 226, g: 87, b: 63 });
-  assert.deepEqual(orange.hsl, { h: 9, s: 74, l: 57 });
+  assert.equal(orange.hex, "#D04138");
+  assert.deepEqual(orange.rgb, { r: 208, g: 65, b: 56 });
+  assert.deepEqual(orange.hsl, { h: 4, s: 62, l: 52 });
   assert.equal(diluted.hex, orange.hex);
   assert.ok(diluted.opacity < orange.opacity);
 });
@@ -308,7 +308,7 @@ test("赤＋青はRGB平均でなく、実顔料固有の低彩度色になる",
   const redBlue = mixPaint({ red: 1, blue: 1 });
   const digitalAverage = { r: 128, g: 0, b: 128 };
 
-  assert.ok(redBlue.hsl.s < 50, `${redBlue.hex} / ${redBlue.hsl.s}%`);
+  assert.ok(redBlue.hsl.s === 55, `${redBlue.hex} / ${redBlue.hsl.s}%`);
   assert.notDeepEqual(redBlue.rgb, digitalAverage);
   assert.equal(redBlue.name, "深いえんじ");
 });

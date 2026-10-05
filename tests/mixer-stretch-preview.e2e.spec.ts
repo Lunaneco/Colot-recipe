@@ -238,15 +238,12 @@ test("押した瞬間から正しい混色を描画し、ドラッグ後も空�
   const livePreview = await canvasDigest(preview);
   expect(livePreview.alphaPixels).toBeGreaterThan(500);
   expect(livePreview.alphaSum).toBeGreaterThan(0);
-  await expect
-    .poll(async () =>
-      (await canvasPixelAtRatio(
-        preview,
-        endRatio.x,
-        endRatio.y,
-      )).slice(0, 3),
-    )
-    .toEqual([0, 161, 233]);
+  // A thin tail transmits more paper than the opaque measured masstone.
+  const tail = await canvasPixelAtRatio(preview, endRatio.x, endRatio.y);
+  expect(tail[0]).toBeLessThan(10);
+  expect(tail[1]).toBeGreaterThanOrEqual(84);
+  expect(tail[2]).toBeGreaterThan(tail[1]);
+  expect(tail[2]).toBeLessThan(180);
   expect(
     (await canvasPixelAtRatio(preview, endRatio.x, endRatio.y))[3],
   ).toBeGreaterThanOrEqual(250);
@@ -376,11 +373,14 @@ test("押下中にviewportと内部キャンバスの寸法が変わってもラ
   );
   await page.mouse.down();
   await expect(canvas).toHaveAttribute("data-live-preview", "true");
+  // Clamp the deposit before resizing so film thickness cannot change between
+  // the before/after observations. Eight units approach the measured masstone.
+  await expect(page.getByTestId("recipe-blue")).toHaveText("8");
   await expect
     .poll(async () =>
       (await canvasPixelAtRatio(preview, point.x, point.y)).slice(0, 3),
     )
-    .toEqual([0, 161, 233]);
+    .toEqual([0, 84, 127]);
   const heightBefore = Number(await preview.getAttribute("height"));
   expect(heightBefore).toBeGreaterThan(0);
 
@@ -395,7 +395,7 @@ test("押下中にviewportと内部キャンバスの寸法が変わってもラ
     .poll(async () =>
       (await canvasPixelAtRatio(preview, point.x, point.y)).slice(0, 3),
     )
-    .toEqual([0, 161, 233]);
+    .toEqual([0, 84, 127]);
   expect(
     (await canvasPixelAtRatio(preview, point.x, point.y))[3],
   ).toBeGreaterThanOrEqual(240);
@@ -409,7 +409,7 @@ test("押下中にviewportと内部キャンバスの寸法が変わってもラ
     .poll(async () =>
       (await canvasPixelAtRatio(source, point.x, point.y)).slice(0, 3),
     )
-    .toEqual([0, 161, 233]);
+    .toEqual([0, 84, 127]);
   expect(
     (await canvasPixelAtRatio(source, point.x, point.y))[3],
   ).toBeGreaterThanOrEqual(240);

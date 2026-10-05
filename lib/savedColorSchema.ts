@@ -1,18 +1,21 @@
-import { hexToRgb, mixPaint, rgbToHsl } from "./colorScience";
+import { hexToRgb, mixPaint, mixPaintProportionsFromRgb, rgbToHsl } from "./colorScience";
 import {
   MATERIAL_IDS,
+  PIGMENT_IDS,
   type CapturedColorAppearance,
+  type ExactPaint,
   type MaterialId,
   type MixGesture,
   type PaintShape,
   type MixedColorSnapshot,
+  type OpticalPaintLayer,
   type PaintSize,
   type PaintStep,
   type RecipeUnits,
   type SavedColor,
 } from "./types";
 
-export const SAVED_COLOR_SCHEMA_VERSION = 3;
+export const SAVED_COLOR_SCHEMA_VERSION = 4;
 export const MAX_IMPORTED_COLORS = 1_000;
 export const MAX_RECIPE_UNITS_PER_MATERIAL = 1_000;
 export const MAX_TOTAL_RECIPE_UNITS = 2_500;
@@ -38,7 +41,7 @@ export type SavedColorImportIssue = {
 
 export type SavedColorImportResult = {
   /** `0` denotes the legacy unversioned array/object shape. */
-  version: 0 | 1 | 2 | typeof SAVED_COLOR_SCHEMA_VERSION;
+  version: 0 | 1 | 2 | 3 | typeof SAVED_COLOR_SCHEMA_VERSION;
   colors: SavedColor[];
   rejected: number;
   issues: SavedColorImportIssue[];
@@ -238,6 +241,9 @@ const normalizeStep = (
     ...(deposit === undefined ? {} : { deposit }),
     ...(value.shape === undefined ? {} : { shape: value.shape }),
     ...(waveSeed === undefined ? {} : { waveSeed }),
+    ...(value.amount === undefined ? {} : {
+      amount: finiteNumber(value.amount, `手順${index + 1}の連続量`, 0, 100_000),
+    }),
     size: value.size ?? "medium",
     x: finiteNumber(value.x, `手順${index + 1}の横位置`, 0, 1),
     y: finiteNumber(value.y, `手順${index + 1}の縦位置`, 0, 1),
@@ -308,6 +314,13 @@ const normalizeGesture = (
   const path = normalizePath(value.path, index);
   const recipe =
     value.recipe === undefined ? undefined : normalizeRecipe(value.recipe);
+  let stepIds: string[] | undefined;
+  if (value.stepIds !== undefined) {
+    if (!Array.isArray(value.stepIds) || value.stepIds.length > MAX_STEPS_PER_COLOR) {
+      throw new SavedColorImportError(`混ぜ方${index + 1}の手順参照が不正です`);
+    }
+    stepIds = value.stepIds.map((id) => identifier(id, "混ぜ方の手順ID"));
+  }
   return {
     id: identifier(value.id, `混ぜ方${index + 1}のID`, `import-mix-${index}`),
     ...(value.kind === undefined ? {} : { kind: value.kind }),
@@ -326,6 +339,7 @@ const normalizeGesture = (
     points,
     ...(path === undefined ? {} : { path }),
     ...(recipe === undefined ? {} : { recipe }),
+    ...(stepIds === undefined ? {} : { stepIds }),
     createdAt: isoDate(
       value.createdAt,
       `混ぜ方${index + 1}の日時`,
@@ -404,7 +418,7 @@ const assertStepsMatchRecipe = (
     MATERIAL_IDS.map((material) => [material, 0]),
   ) as RecipeUnits;
   for (const step of steps) {
-    const deposit = step.deposit ?? 1;
+    const deposit = step.amount ?? step.deposit ?? 1;
     for (const material of MATERIAL_IDS) {
       const batchUnits =
         step.recipe === undefined
@@ -425,6 +439,51 @@ const assertStepsMatchRecipe = (
       "絵の具の手順合計が色の配合と一致しません",
     );
   }
+};
+
+const normalizeExactPaint = (value: unknown): ExactPaint | undefined => {
+  if (value === undefined || value === null) return undefined;
+  if (!isRecord(value) || !isRecord(value.weights)) {
+    throw new SavedColorImportError("連続顔料量が正しくありません");
+  }
+  const inputWeights = value.weights;
+  const weights = Object.fromEntries(MATERIAL_IDS.map((material) => [material,
+    finiteNumber(inputWeights[material] ?? 0, `${material}の連続量`, 0, 100_000),
+  ])) as RecipeUnits;
+  if (PIGMENT_IDS.reduce((sum, p) => sum + weights[p], 0) <= 0) {
+    throw new SavedColorImportError("連続顔料量に顔料がありません");
+  }
+  let layerCount = 0;
+  const normalizeFilm = (entry: unknown, depth = 0): OpticalPaintLayer => {
+      layerCount += 1;
+      if (depth > 32 || layerCount > 2048) throw new SavedColorImportError("測定顔料膜の階層が大きすぎます");
+      if (!isRecord(entry) || !Array.isArray(entry.pigment) || entry.pigment.length !== PIGMENT_IDS.length) {
+        throw new SavedColorImportError("測定顔料膜の顔料比が正しくありません");
+      }
+      let pigment = entry.pigment.map((amount) => finiteNumber(amount, "測定顔料膜の顔料比", 0, 1));
+      const sum = pigment.reduce((a, b) => a + b, 0);
+      if (sum <= 0 || Math.abs(sum - 1) > 0.001) throw new SavedColorImportError("測定顔料膜の顔料比が正規化されていません");
+      let mass = finiteNumber(entry.mass, "測定顔料膜の厚み", 0, 100_000);
+      let children: OpticalPaintLayer[] | undefined;
+      if (entry.children !== undefined) {
+        if (!Array.isArray(entry.children) || !entry.children.length || entry.children.length > 64) {
+          throw new SavedColorImportError("測定顔料膜の子階層が正しくありません");
+        }
+        children = entry.children.map((child) => normalizeFilm(child, depth + 1));
+        mass = children.reduce((total, child) => total + child.mass, 0);
+        if (mass <= 0 || mass > 100_000) throw new SavedColorImportError("測定顔料膜の子階層の厚みが範囲外です");
+        pigment = PIGMENT_IDS.map((_, p) => children!.reduce((total, child) => total + child.pigment[p] * child.mass, 0) / mass);
+      }
+      return { pigment, mass,
+        ...(entry.opacity === undefined ? {} : { opacity: finiteNumber(entry.opacity, "測定顔料膜の透明度", 0, 1) }),
+        ...(entry.lighting === undefined ? {} : { lighting: finiteNumber(entry.lighting, "測定顔料膜の照明", 0, 4) }),
+        ...(children === undefined ? {} : { children }),
+      };
+  };
+  const opticalStack = value.opticalStack === undefined ? undefined
+    : normalizeArray(value.opticalStack, "測定顔料膜", 64, (entry) => normalizeFilm(entry));
+  return { weights, opticalMass: finiteNumber(value.opticalMass, "光学厚み", 0, 100_000),
+    ...(opticalStack === undefined ? {} : { opticalStack }) };
 };
 
 /**
@@ -471,19 +530,24 @@ export function normalizeSavedColor(
   const capturedAppearance = normalizeCapturedAppearance(
     value.capturedAppearance,
   );
+  const exactPaint = normalizeExactPaint(value.exactPaint);
   const calculated = calculatedSnapshot(recipe);
   const capturedRgb = capturedAppearance
     ? hexToRgb(capturedAppearance.hex)
     : undefined;
+  const physical = exactPaint
+    ? mixPaintProportionsFromRgb(exactPaint.weights, capturedRgb ?? calculated.rgb)
+    : calculated;
   const mixed = capturedAppearance && capturedRgb
     ? {
-        ...calculated,
+        ...physical,
         hex: capturedAppearance.hex,
         rgb: capturedRgb,
         hsl: rgbToHsl(capturedRgb),
         opacity: capturedAppearance.opacity,
+        ...(exactPaint ? { exactPaint } : {}),
       }
-    : calculated;
+    : { ...physical, ...(exactPaint ? { exactPaint } : {}) };
   const name = boundedString(value.name, "色名", MAX_NAME_LENGTH, mixed.name);
   const steps = normalizeArray(
     value.steps,
@@ -491,7 +555,7 @@ export function normalizeSavedColor(
     MAX_STEPS_PER_COLOR,
     (entry, stepIndex) => normalizeStep(entry, stepIndex, createdAt),
   );
-  assertStepsMatchRecipe(steps, recipe);
+  if (!exactPaint) assertStepsMatchRecipe(steps, recipe);
 
   return {
     id,
@@ -500,6 +564,7 @@ export function normalizeSavedColor(
     recipe,
     mixed,
     ...(capturedAppearance === undefined ? {} : { capturedAppearance }),
+    ...(exactPaint === undefined ? {} : { exactPaint }),
     steps,
     mixGestures: normalizeArray(
       value.mixGestures,
@@ -559,6 +624,7 @@ export function parseSavedColorsJson(
         (decoded.version !== 0 &&
           decoded.version !== 1 &&
           decoded.version !== 2 &&
+          decoded.version !== 3 &&
           decoded.version !== SAVED_COLOR_SCHEMA_VERSION)
       ) {
         throw new SavedColorImportError(

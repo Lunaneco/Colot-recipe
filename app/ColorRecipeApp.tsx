@@ -21,9 +21,10 @@ import {
   useState,
 } from "react";
 import { ColorDetailDialog, SaveColorDialog } from "../components/ColorDialogs";
+import type { SampledPaint } from "../components/DrawingStudio";
 import { MixingStudio } from "../components/MixingStudio";
 import { SavedPalette } from "../components/SavedPalette";
-import { mixPaint } from "../lib/colorScience";
+import { mixPaint, mixPaintProportionsFromRgb, type MixedPaintColor } from "../lib/colorScience";
 import {
   paintStepDeposit,
   paintStepRecipe,
@@ -34,7 +35,7 @@ import {
   MAX_RECIPE_UNITS_PER_MATERIAL,
   MAX_TOTAL_RECIPE_UNITS,
 } from "../lib/savedColorSchema";
-import type { SpatialPaintSample } from "../lib/spatialMix";
+import { stepsFromExactPaint, type SpatialPaintSample } from "../lib/spatialMix";
 import {
   exportAppBackup,
   importAppBackup,
@@ -48,6 +49,7 @@ import {
 } from "../lib/storage";
 import type {
   AppMode,
+  ExactPaint,
   MaterialId,
   MixedColorSnapshot,
   MixGesture,
@@ -84,6 +86,8 @@ type MixerState = {
   recipe: typeof EMPTY_RECIPE;
   steps: SavedColor["steps"];
   mixGestures: SavedColor["mixGestures"];
+  reopenedSample?: { x: number; y: number };
+  reopenedPaint?: ExactPaint;
 };
 
 type PaintPlacement = Pick<
@@ -176,8 +180,7 @@ function isEditableTarget(target: EventTarget | null) {
   );
 }
 
-function mixedSnapshot(recipe: typeof EMPTY_RECIPE): MixedColorSnapshot {
-  const result = mixPaint(recipe);
+function snapshotFromMixedPaint(result: MixedPaintColor): MixedColorSnapshot {
   return {
     hex: result.hex,
     rgb: result.rgb,
@@ -193,12 +196,31 @@ function mixedSnapshot(recipe: typeof EMPTY_RECIPE): MixedColorSnapshot {
   };
 }
 
+function mixedSnapshot(recipe: typeof EMPTY_RECIPE): MixedColorSnapshot {
+  return snapshotFromMixedPaint(mixPaint(recipe));
+}
+
+/**
+ * The drawing eyedropper returns the pigment proportions actually sitting on
+ * the paper, so the picked colour is a real, re-mixable recipe.
+ */
+function snapshotFromSampledPaint(sample: SampledPaint): MixedColorSnapshot {
+  const water =
+    sample.waterRatio >= 0.97 ? 32 : sample.waterRatio / (1 - sample.waterRatio);
+  const snapshot = snapshotFromMixedPaint(
+    mixPaintProportionsFromRgb({ ...sample.pigmentRatio, water }, sample.rgb),
+  );
+  return { ...snapshot, ...(sample.exactPaint ? { exactPaint: sample.exactPaint } : {}),
+    name: `スポイトで見つけた${snapshot.name}` };
+}
+
 function cloneMixedSnapshot(mixed: MixedColorSnapshot): MixedColorSnapshot {
   return {
     ...mixed,
     rgb: { ...mixed.rgb },
     hsl: { ...mixed.hsl },
     pigmentRatio: { ...mixed.pigmentRatio },
+    ...(mixed.exactPaint ? { exactPaint: structuredClone(mixed.exactPaint) } : {}),
   };
 }
 
@@ -239,50 +261,6 @@ function recipeFitsSaveLimits(recipe: RecipeUnits): boolean {
       0,
     ) <= MAX_TOTAL_RECIPE_UNITS
   );
-}
-
-function snapshotFromHex(hex: string): MixedColorSnapshot {
-  const value = hex.replace("#", "");
-  const rgb = {
-    r: Number.parseInt(value.slice(0, 2), 16),
-    g: Number.parseInt(value.slice(2, 4), 16),
-    b: Number.parseInt(value.slice(4, 6), 16),
-  };
-  const red = rgb.r / 255;
-  const green = rgb.g / 255;
-  const blue = rgb.b / 255;
-  const maximum = Math.max(red, green, blue);
-  const minimum = Math.min(red, green, blue);
-  const delta = maximum - minimum;
-  const lightness = (maximum + minimum) / 2;
-  let hue = 0;
-  if (delta) {
-    if (maximum === red) hue = 60 * (((green - blue) / delta) % 6);
-    else if (maximum === green) hue = 60 * ((blue - red) / delta + 2);
-    else hue = 60 * ((red - green) / delta + 4);
-  }
-  if (hue < 0) hue += 360;
-  const saturation =
-    delta === 0 ? 0 : delta / (1 - Math.abs(2 * lightness - 1));
-  return {
-    hex,
-    rgb,
-    hsl: {
-      h: Math.round(hue),
-      s: Math.round(saturation * 100),
-      l: Math.round(lightness * 100),
-    },
-    pigmentRatio: Object.fromEntries(
-      PIGMENT_IDS.map((pigment) => [pigment, 0]),
-    ) as MixedColorSnapshot["pigmentRatio"],
-    opacity: 1,
-    waterRatio: 0,
-    intensity: 1,
-    viscosity: 0.65,
-    spread: 0.3,
-    dryingSpeed: 0.65,
-    name: "スポイトで見つけた色",
-  };
 }
 
 export default function ColorRecipeApp() {
@@ -589,6 +567,7 @@ export default function ColorRecipeApp() {
       if (!recipeFitsSaveLimits(committedRecipe)) return current;
       return {
         ...current,
+        reopenedPaint: undefined,
         recipe: committedRecipe,
         steps: [
           ...current.steps,
@@ -651,6 +630,7 @@ export default function ColorRecipeApp() {
       if (!recipeFitsSaveLimits(committedRecipe)) return current;
       return {
         ...current,
+        reopenedPaint: undefined,
         recipe: committedRecipe,
         steps: [
           ...current.steps,
@@ -707,6 +687,7 @@ export default function ColorRecipeApp() {
     const targetRecipe = paintStepRecipe(target);
     mixer.commit((current) => ({
       ...current,
+      reopenedPaint: undefined,
       recipe: Object.fromEntries(
         MATERIAL_IDS.map((material) => [
           material,
@@ -729,11 +710,13 @@ export default function ColorRecipeApp() {
   const addMixGesture = (gesture: Omit<MixGesture, "id" | "createdAt">) => {
     mixer.commit((current) => ({
       ...current,
+      reopenedPaint: undefined,
       mixGestures: [
         ...current.mixGestures,
         {
           ...gesture,
           recipe: { ...current.recipe },
+          stepIds: current.steps.map((step) => step.id),
           id: createId("mix"),
           createdAt: new Date().toISOString(),
         },
@@ -786,6 +769,7 @@ export default function ColorRecipeApp() {
       if (!recipeFitsSaveLimits(committedRecipe)) return current;
       return {
         ...current,
+        reopenedPaint: undefined,
         recipe: committedRecipe,
         steps: [
           ...current.steps,
@@ -860,6 +844,7 @@ export default function ColorRecipeApp() {
       if (!recipeFitsSaveLimits(committedRecipe)) return current;
       return {
         ...current,
+        reopenedPaint: undefined,
         recipe: committedRecipe,
         steps: [
           ...current.steps,
@@ -915,7 +900,9 @@ export default function ColorRecipeApp() {
     }
     setSaveDraft({
       recipe: { ...recipe },
-      mixed: cloneMixedSnapshot(sample?.mixed ?? currentMixed),
+      mixed: cloneMixedSnapshot(sample
+        ? { ...sample.mixed, exactPaint: sample.exactPaint }
+        : currentMixed),
       sampled: Boolean(sample),
     });
     setSaveDialogOpen(true);
@@ -941,6 +928,10 @@ export default function ColorRecipeApp() {
       note,
       recipe: { ...saveDraft.recipe },
       mixed: cloneMixedSnapshot(saveDraft.mixed),
+      ...(saveDraft.mixed.exactPaint
+        ? { exactPaint: { ...saveDraft.mixed.exactPaint,
+            weights: { ...saveDraft.mixed.exactPaint.weights } } }
+        : {}),
       ...(savingSample
         ? {
             capturedAppearance: {
@@ -1024,7 +1015,9 @@ export default function ColorRecipeApp() {
 
   const reopenColor = (color: SavedColor) => {
     const steps =
-      color.steps?.length > 0
+      color.exactPaint
+        ? stepsFromExactPaint(color.exactPaint, new Date().toISOString())
+        : color.steps?.length > 0
         ? color.steps
         : Object.entries(color.recipe).flatMap(([material, count], materialIndex) =>
             Array.from({ length: count }, (_, index) => ({
@@ -1039,10 +1032,12 @@ export default function ColorRecipeApp() {
     mixer.reset({
       recipe: { ...color.recipe },
       steps,
-      mixGestures: color.mixGestures ?? [],
+      mixGestures: color.exactPaint ? [] : color.mixGestures ?? [],
+      ...(color.exactPaint ? { reopenedSample: { x: 0.5, y: 0.51 } } : {}),
+      ...(color.exactPaint?.opticalStack ? { reopenedPaint: structuredClone(color.exactPaint) } : {}),
     });
     setSelectedRecipeColorId(undefined);
-    setSelectedMaterial("red");
+    setSelectedMaterial(color.exactPaint ? "picker" : "red");
     setMode("mix");
     setDetailColor(undefined);
     setPaletteOpen(false);
@@ -1086,9 +1081,7 @@ export default function ColorRecipeApp() {
 
   const importColors = async (file: File) => {
     try {
-      if (file.size === 0 || file.size > MAX_COLOR_IMPORT_BYTES) {
-        throw new Error("Recipe import file is too large");
-      }
+      if (file.size === 0 || file.size > MAX_COLOR_IMPORT_BYTES) throw new Error("Recipe import file is too large");
       const result = parseSavedColorsJson(await file.text());
       const seenIds = new Set(savedColors.map((color) => color.id));
       const imported = result.colors.map((color) => {
@@ -1124,9 +1117,7 @@ export default function ColorRecipeApp() {
 
   const importFullBackup = async (file: File) => {
     try {
-      if (file.size === 0 || file.size > MAX_BACKUP_IMPORT_BYTES) {
-        throw new Error("Backup import file is too large");
-      }
+      if (file.size === 0 || file.size > MAX_BACKUP_IMPORT_BYTES) throw new Error("Backup import file is too large");
       const result = await importAppBackup(await file.text(), { mode: "merge" });
       const restoredColors = await loadColors();
       resetPaletteHistory(restoredColors);
@@ -1328,8 +1319,8 @@ export default function ColorRecipeApp() {
                   color={activeDrawingColor}
                   colorName={activeDrawingColorName}
                   onOpenPalette={openOrFocusPalette}
-                  onSampleColor={(hex) => {
-                    setSampledColor(snapshotFromHex(hex));
+                  onSampleColor={(sample) => {
+                    setSampledColor(snapshotFromSampledPaint(sample));
                     setActiveColorId(undefined);
                     showToast("スポイトで色を取りました");
                   }}

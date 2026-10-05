@@ -30,7 +30,7 @@ try {
   await mixCanvas.click({ position: { x: 400, y: 300 } });
   await page.waitForFunction(() => {
     const ratio = document.querySelector(".pigment-ratio strong")?.textContent;
-    return ratio?.includes("赤 50.0%") && ratio.includes("黄 50.0%");
+    return /赤 \d+\.\d%：黄 \d+\.\d%/.test(ratio ?? "");
   });
   await page.getByRole("button", { name: "くわしい数値を見る" }).click();
   await page.waitForTimeout(320);
@@ -53,10 +53,10 @@ try {
 
   await page.getByTestId("open-save-color").click();
   const saveDialog = page.getByRole("dialog", { name: "この色を登録" });
-  await saveDialog.getByLabel("色の名前").fill("夕焼けオレンジ");
+  await saveDialog.getByLabel("色の名前").fill("夕焼けの紅赤");
   await saveDialog
     .getByLabel(/ひとことメモ/)
-    .fill("夕方の光と花びらに使う、やわらかな橙");
+    .fill("夕方の光と花びらに使う、深い赤");
   await saveDialog.getByTestId("confirm-save-color").click();
   await page.waitForTimeout(3_000);
   await page.screenshot({

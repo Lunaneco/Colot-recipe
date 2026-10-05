@@ -126,7 +126,7 @@ test.beforeEach(async ({ context, page }) => {
   );
 });
 
-test("最初の赤・青・黄・黒を指定されたHEXで表示して使える", async ({
+test("実測顔料の赤・青・黄・黒をスウォッチと同じHEXで使える", async ({
   page,
 }) => {
   const appPrimaryColors = await page.locator(".color-recipe-app").evaluate(
@@ -144,10 +144,10 @@ test("最初の赤・青・黄・黒を指定されたHEXで表示して使え�
     },
   );
   expect(appPrimaryColors).toEqual({
-    red: "#E60012",
-    blue: "#00A1E9",
-    yellow: "#FFF100",
-    black: "#000000",
+    red: "#BD0015",
+    blue: "#00547F",
+    yellow: "#FED200",
+    black: "#1D1E20",
   });
 
   await page
@@ -155,10 +155,10 @@ test("最初の赤・青・黄・黒を指定されたHEXで表示して使え�
     .click();
   const canvas = page.getByTestId("mix-canvas");
   const cases = [
-    ["red", "#E60012", "rgb(230, 0, 18)"],
-    ["blue", "#00A1E9", "rgb(0, 161, 233)"],
-    ["yellow", "#FFF100", "rgb(255, 241, 0)"],
-    ["black", "#000000", "rgb(0, 0, 0)"],
+    ["red", "#BD0015", "rgb(189, 0, 21)"],
+    ["blue", "#00547F", "rgb(0, 84, 127)"],
+    ["yellow", "#FED200", "rgb(254, 210, 0)"],
+    ["black", "#1D1E20", "rgb(29, 30, 32)"],
   ] as const;
 
   for (const [material, expectedHex, expectedCss] of cases) {
@@ -201,9 +201,9 @@ test("既存レイアウトのまま白基調と3原色アクセントで表示�
   });
 
   expect(theme).toEqual({
-    red: "#E60012",
-    blue: "#00A1E9",
-    yellow: "#FFF100",
+    red: "#BD0015",
+    blue: "#00547F",
+    yellow: "#FED200",
     bodyBackground: "rgb(246, 247, 249)",
     headerBackground: "rgba(255, 255, 255, 0.97)",
     cardBackground: "rgb(255, 255, 255)",
@@ -728,6 +728,7 @@ test("透明背景の線画でも、余白を線にせず枠内だけを一括�
 test("読み込んだ線画ごとに進捗を分け、ブラシ設定とUndo・Redo結果を再読込できる", async ({
   page,
 }) => {
+  await page.addInitScript(({now}) => { Date.now = () => now; }, {now: Date.now()});
   const squareLineArt = await createLineArtPng(page, "square");
   const circleLineArt = await createLineArtPng(page, "circle");
 
@@ -805,9 +806,12 @@ test("読み込んだ線画ごとに進捗を分け、ブラシ設定とUndo・R
   await expect(
     page.locator('#coloring-inspector input[type="range"]'),
   ).toHaveValue("62");
-  await expect
-    .poll(() => pixelAt(fillCanvas, 180, 100))
-    .toEqual(circlePainted);
+  // Physical PNG planes quantise material, with at most two display levels
+  // of error. Undo/Redo above remains an exact in-memory pixel comparison.
+  await expect.poll(async () => {
+    const pixel = await pixelAt(fillCanvas, 180, 100);
+    return Math.max(...pixel.map((value, index) => Math.abs(value - circlePainted[index])));
+  }).toBeLessThanOrEqual(2);
   await expect
     .poll(() => pixelAt(fillCanvas, 100, 100))
     .toEqual(squareBefore);
@@ -828,7 +832,8 @@ test("読み込んだ線画ごとに進捗を分け、ブラシ設定とUndo・R
       mimeType: "image/png",
       buffer: squareLineArt,
     });
-  await expect
-    .poll(() => pixelAt(fillCanvas, 100, 100))
-    .toEqual(squarePainted);
+  await expect.poll(async () => {
+    const pixel = await pixelAt(fillCanvas, 100, 100);
+    return Math.max(...pixel.map((value, index) => Math.abs(value - squarePainted[index])));
+  }).toBeLessThanOrEqual(2);
 });

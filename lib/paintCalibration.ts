@@ -110,7 +110,7 @@ export const PAINT_CALIBRATION_METADATA: PaintCalibrationMetadata =
       transcriptionLicense: "MIT",
     }),
     limitations: Object.freeze([
-      "The current renderer uses the opaque infinite-thickness form; finite film thickness and paper reflectance are not yet modelled.",
+      "The calibration targets opaque infinite-thickness masstones; the renderer also models finite films and paper reflection with relative optical thickness, which is not calibrated to micrometres.",
       "The fixed K and S curves represent one measured paint system and cannot predict every brand, binder, pigment load, wet state, or particle dispersion.",
       "Fluorescent, metallic, pearlescent, interference, and strongly directional pigments require a different optical model.",
     ]),

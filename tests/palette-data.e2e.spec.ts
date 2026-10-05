@@ -39,7 +39,7 @@ test("保存パレットをUndo・Redoでき、版付きレシピJSONを安全�
     version: number;
     colors: unknown[];
   };
-  expect(exported.version).toBe(3);
+  expect(exported.version).toBe(4);
   expect(exported.colors).toHaveLength(1);
 
   await page.getByTestId("palette-undo").click();
