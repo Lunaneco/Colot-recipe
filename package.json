@@ -42,7 +42,7 @@
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
-    "@types/react-dom": "19.2.3",
+    "@types/react-dom": "19.2.4",
     "@types/three": "^0.185.1",
     "@vitejs/plugin-react": "6.0.2",
     "eslint": "10.8.0",
